@@ -37,7 +37,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - uses: taiki-e/install-action@sqlx-cli
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli
 
       - name: migrate up
         run: sqlx migrate run --source db/migrations
