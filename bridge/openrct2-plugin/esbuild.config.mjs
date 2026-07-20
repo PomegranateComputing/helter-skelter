@@ -27,10 +27,13 @@ await build({
 });
 
 // Pure functions with no game-global dependency, bundled separately so
-// tests can exercise them without a running OpenRCT2 process.
+// tests can exercise them without a running OpenRCT2 process. Named
+// pure.ts/pure.js, not test*.ts -- `node --test` with no path arguments
+// discovers files by a "test" substring in the name and will try (and
+// fail) to execute a matching *source* .ts file directly.
 await build({
-  entryPoints: ["src/test-exports.ts"],
-  outfile: "dist/test-exports.js",
+  entryPoints: ["src/pure.ts"],
+  outfile: "dist/pure.js",
   bundle: true,
   format: "esm",
   target: "es2020",

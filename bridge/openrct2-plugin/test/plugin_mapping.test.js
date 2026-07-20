@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { mapWeather, mapRideStatus, randomUuidV7 } from "../dist/test-exports.js";
+import { mapWeather, mapRideStatus, randomUuidV7 } from "../dist/pure.js";
 
 const UUIDV7_PATTERN =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
@@ -47,8 +47,13 @@ test("randomUuidV7 matches the envelope schema's uuidv7 pattern", () => {
   }
 });
 
-test("randomUuidV7 is time-ordered", () => {
-  const first = randomUuidV7();
-  const second = randomUuidV7();
-  assert.ok(first < second || first === second, "successive UUIDv7s should sort non-decreasing");
+test("randomUuidV7's timestamp component is non-decreasing", () => {
+  // Compare only the timestamp-derived prefix (first 13 characters,
+  // "XXXXXXXX-XXXX"), not the full string -- two calls landing in the same
+  // millisecond have identical timestamp bits but independently random
+  // remaining bits, which are not (and needn't be) ordered.
+  const timestampPrefix = (id) => id.slice(0, 13);
+  const first = timestampPrefix(randomUuidV7());
+  const second = timestampPrefix(randomUuidV7());
+  assert.ok(first <= second, `expected ${first} <= ${second}`);
 });
