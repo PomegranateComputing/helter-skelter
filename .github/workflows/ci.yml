@@ -9,6 +9,25 @@ jobs:
   rust:
     name: rust
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: helterskelter
+          POSTGRES_PASSWORD: helterskelter
+          POSTGRES_DB: helterskelter
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U helterskelter -d helterskelter"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # sqlx::query!/query_scalar! connect to this at compile time to
+      # check queries against the real schema, so migrations must be
+      # applied before any cargo build/clippy/test step below runs.
+      DATABASE_URL: postgres://helterskelter:helterskelter@localhost:5432/helterskelter
     steps:
       - uses: actions/checkout@v4
 
@@ -17,6 +36,19 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli
+
+      - name: migrate up
+        run: sqlx migrate run --source db/migrations
+
+      - name: migrate down (verify reversibility)
+        run: sqlx migrate revert --source db/migrations
+
+      - name: migrate up again
+        run: sqlx migrate run --source db/migrations
 
       - name: fmt
         run: cargo fmt --check

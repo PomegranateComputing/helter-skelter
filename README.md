@@ -69,15 +69,20 @@ local GOG copy of RollerCoaster Tycoon 2 extracted under `assets/gog/` (see
 is never committed to this repository).
 
 ```bash
+# Bring up PostgreSQL and apply migrations FIRST -- core/orchestrator's
+# sqlx::query! macros connect to DATABASE_URL at compile time to check
+# queries against the real schema, so this has to happen before any
+# `cargo build`/`clippy`/`test`, not just before running the orchestrator.
+# See docs/DECISIONS.md ADR-0003.
+make db-up
+make db-migrate
+
 # Build the Rust workspace
 cargo build --workspace
 
 # Build the OpenRCT2 bridge plugin
 cd bridge/openrct2-plugin && pnpm install && pnpm build
 
-# Bring up PostgreSQL and any other local services
-docker compose up -d
-
 # Run the orchestrator (starts the observe -> propose -> authorize -> act loop)
-cargo run -p orchestrator
+cd - && DATABASE_URL=postgres://helterskelter:helterskelter@localhost:5433/helterskelter cargo run -p orchestrator
 ```

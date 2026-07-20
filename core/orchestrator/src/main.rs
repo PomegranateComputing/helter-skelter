@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::path::Path;
 
-use orchestrator::{config, new_shared};
+use orchestrator::{config, db, new_shared, OrchestratorError, Persistence};
 
 /// Health endpoint port. Not read from config/bridge.json (that file is
 /// the bridge<->orchestrator port both sides must agree on); this is
@@ -20,8 +20,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tcp_addr: SocketAddr = format!("{}:{}", bridge_config.host, bridge_config.port).parse()?;
     let health_addr: SocketAddr = format!("{}:{}", bridge_config.host, HEALTH_PORT).parse()?;
 
+    let database_url = std::env::var("DATABASE_URL")
+        .map_err(|_| OrchestratorError::MissingEnvVar("DATABASE_URL".to_string()))?;
+    let pool = db::connect(&database_url).await?;
+
     let shared = new_shared();
-    orchestrator::run(shared, tcp_addr, health_addr).await?;
+    let persistence = Persistence::spawn(pool, shared.clone());
+    orchestrator::run(shared, persistence, tcp_addr, health_addr).await?;
 
     Ok(())
 }
