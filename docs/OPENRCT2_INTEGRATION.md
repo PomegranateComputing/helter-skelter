@@ -183,23 +183,24 @@ API.
   (`docs/PROTOCOL.md`: localhost TCP) is not just a convention we're
   imposing — it's the only thing the plugin API permits.
 
-## Plugin type semantics (correction to our stub)
+## Plugin type semantics
 
-`bridge/openrct2-plugin/src/index.ts` currently declares `type: "remote"`.
-Per `enum class PluginType` (`src/openrct2/scripting/Plugin.h:24-43`),
-that's not the right semantic fit:
+Per `enum class PluginType` (`src/openrct2/scripting/Plugin.h:24-43`):
 - `Local` — runs on servers/clients, no game-state impact, never uploaded
   to other clients.
 - `Remote` — uploaded to other clients in multiplayer, with ability to
   modify game state in certain contexts. This is about **multiplayer
   distribution**, not single-player capability.
 - `Intransient` — loads at game start and only unloads explicitly, rather
-  than unloading on every park change.
+  than unloading on every park change. `doc/openrct2.d.ts` confirms this
+  is also a hard requirement for some hooks: `subscribe(hook:
+  "map.changed", ...)` is documented "Can only be used in intransient
+  plugins."
 
 A long-running bridge/telemetry plugin that must survive scenario/park
 changes without reloading is a better match for **`intransient`** than
-`remote`. Not changed here (out of this task's scope) — flagged for the
-plugin implementation task.
+`remote` — `bridge/openrct2-plugin/src/index.ts` was corrected to
+`type: "intransient"` as part of implementing the plugin.
 
 ## Headless-mode limitations
 
@@ -262,15 +263,56 @@ genuinely insufficient").
   a numeric `error` plus separate `errorTitle`/`errorMessage` strings; our
   protocol's `engine_error` is `{code, message}`. The exact mapping (e.g.
   does `code` become the stringified numeric error, does `message`
-  concatenate title+message) isn't decided — deferred to the bridge
-  implementation task.
-- **`ride.status`/`weather` enum completeness.** `ride.status` is missing
-  `simulating` (documented above as a known discrepancy, not fixed here).
-  `weather`'s exact wire values were written speculatively in the original
-  protocol task and have not yet been checked against
-  `src/openrct2/climate/*` — still open.
-- **Plugin bundling format assumption unverified against `doc/openrct2.d.ts`
-  in detail** beyond the action/hook signatures checked here — the full
-  `registerPlugin()` metadata shape (`bridge/openrct2-plugin/src/index.ts`)
-  should be diffed against `doc/openrct2.d.ts` when the plugin is actually
-  implemented, not assumed correct from this env-setup task.
+  concatenate title+message) isn't decided — deferred to the command-
+  execution implementation task (this task only implements observation,
+  not command execution).
+- **No ride queue-length metric anywhere in the scripting API.** Checked
+  exhaustively against `doc/openrct2.d.ts` (packaged in the `v0.5.3`
+  release): `Ride` has no queue field, `RideStation` only has station
+  platform geometry (`start`, `length`, `entrance`, `exit` — not a guest
+  count), and `Peep`/`Guest` expose no `state` or `currentRide` field to
+  derive it indirectly by counting queuing guests. `observation.ts`
+  currently emits a hardcoded `queue_length: 0` for every ride, which is a
+  placeholder, not a measurement — the real-run evidence in the PR
+  description shows this clearly (both rides in the dev park always
+  report `queue_length: 0` regardless of guest count). Resolving this
+  needs either a future OpenRCT2 API addition or an engine patch.
+- **`ride.status`/`weather` enum completeness — now fully resolved by
+  implementation, not just flagged:**
+  - `Ride.status` (read) is confirmed already the string union
+    `"closed" | "open" | "testing" | "simulating"` (`doc/openrct2.d.ts`
+    `type RideStatus`), so no numeric→string conversion is needed when
+    reading (only when *writing* via `ridesetstatus`). Our protocol's
+    3-value enum is missing `simulating`; `observation.ts`'s
+    `mapRideStatus()` maps it to `"testing"` as the closest existing value
+    and logs nothing (silent, lossy) — acceptable for 0.1 since the dev
+    park never reaches that state, but worth fixing before a scenario that
+    does.
+  - `climate.current.weather`'s real values, confirmed from
+    `doc/openrct2.d.ts`'s `type WeatherType`, are **camelCase** and include
+    a 9th value our schema has no slot for: `"sunny" | "partiallyCloudy" |
+    "cloudy" | "rain" | "heavyRain" | "thunder" | "snow" | "heavySnow" |
+    "blizzard"`. Our protocol schema uses snake_case and has only 8 values
+    (no `blizzard`). `observation.ts`'s `mapWeather()` handles the
+    camelCase→snake_case rename and maps `"blizzard"` to `"heavy_snow"` as
+    the closest existing value.
+  - `ride.object.identifier` (e.g. `"rct2.ride.arrt2"`, confirmed via a
+    real headless run) is what populates our protocol's `ride.type`
+    string field — not the numeric `ride.type` property (the internal
+    built-in ride type ID), which is a different thing with a confusingly
+    identical name in the scripting API.
+  - `date.month` is 0-indexed (`0` = March .. `7` = October,
+    `doc/openrct2.d.ts`'s `GameDate.month`) while our protocol's
+    `park_date.month` is 1-indexed (1-8, matching the schema's
+    `minimum: 1, maximum: 8`) — `observation.ts` adds 1. Confirmed correct
+    against a real run: a dev-park snapshot taken on the park's first day
+    reports `park_date.month: 1`, not `0`.
+  - `ride.price` is `number[]` (index 0 = primary admission/ride price,
+    a further index for secondary pricing on some ride/stall types) —
+    `observation.ts` takes index 0.
+- **Plugin bundling format**: resolved by this task, not left open. The
+  hand-written ambient declaration this repo used for `registerPlugin`
+  (a 9-line guess) has been replaced with the actual
+  `doc/openrct2.d.ts` vendored from the `v0.5.3` release tarball
+  (`bridge/openrct2-plugin/src/types/openrct2.d.ts`) — the plugin now
+  type-checks against the real API surface, not an assumption.
