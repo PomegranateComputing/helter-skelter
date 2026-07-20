@@ -18,12 +18,16 @@ GAME_LOG="${LOG_DIR}/openrct2-headless-${TIMESTAMP}.log"
 OPENRCT2_BIN="${REPO_ROOT}/runtime/openrct2/${OPENRCT2_VERSION}/OpenRCT2/openrct2-cli"
 PARK="${REPO_ROOT}/assets/scenarios/dev/dev-park.park"
 PLUGIN_DIR="${HOME}/.config/OpenRCT2/plugin"
+export DATABASE_URL="${DATABASE_URL:-postgres://helterskelter:helterskelter@localhost:5433/helterskelter}"
 
 log() { printf '[run-stack] %s\n' "$*"; }
 fail() { printf '[run-stack] ERROR: %s\n' "$*" >&2; exit 1; }
 
 [ -x "${OPENRCT2_BIN}" ] || fail "OpenRCT2 not installed. Run scripts/bootstrap/setup-openrct2.sh first."
 [ -f "${PARK}" ] || fail "Dev park not found at ${PARK} (see assets/scenarios/dev/README.md)."
+
+log "Bringing up PostgreSQL and applying migrations..."
+(cd "${REPO_ROOT}" && make db-up && DATABASE_URL="${DATABASE_URL}" make db-migrate)
 
 log "Building bridge plugin..."
 (cd "${REPO_ROOT}/bridge/openrct2-plugin" && pnpm build)
@@ -47,7 +51,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 log "Starting orchestrator, logging to ${ORCH_LOG}"
-(cd "${REPO_ROOT}" && RUST_LOG=info "${ORCH_BIN}") >"${ORCH_LOG}" 2>&1 &
+(cd "${REPO_ROOT}" && RUST_LOG=info DATABASE_URL="${DATABASE_URL}" "${ORCH_BIN}") >"${ORCH_LOG}" 2>&1 &
 ORCH_PID=$!
 
 # Give the TCP/health listeners a moment to bind before the bridge tries

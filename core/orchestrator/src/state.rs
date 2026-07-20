@@ -93,9 +93,23 @@ impl ConnectionHealth {
     }
 }
 
+/// Database reachability, tracked separately from the bridge connection's
+/// [`ConnectionState`] -- see db.rs. CAUTIOUS mirrors the vocabulary
+/// docs/VISION.md's fuller AFK safety-state machine (0.1 only needs this
+/// one degraded state; NORMAL/CONSERVATION/QUARANTINE/etc. are later
+/// milestones).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DbState {
+    #[default]
+    Connected,
+    Cautious,
+}
+
 pub struct SharedState {
     pub health: ConnectionHealth,
     pub world: WorldModel,
+    pub db_state: DbState,
 }
 
 impl Default for SharedState {
@@ -103,6 +117,7 @@ impl Default for SharedState {
         Self {
             health: ConnectionHealth::default(),
             world: WorldModel::new(),
+            db_state: DbState::default(),
         }
     }
 }

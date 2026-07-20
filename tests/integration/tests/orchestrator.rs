@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use orchestrator::new_shared;
+use orchestrator::{db, new_shared, Persistence};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::sleep;
@@ -34,6 +34,51 @@ async fn send_fixture(bridge: &mut TcpStream, name: &str) {
     bridge.write_all(b"\n").await.unwrap();
 }
 
+async fn pool() -> sqlx::PgPool {
+    let database_url = std::env::var("DATABASE_URL")
+        .expect("DATABASE_URL must be set (see .env.example) to run the integration tests");
+    db::connect(&database_url)
+        .await
+        .expect("connect to test database")
+}
+
+struct ObservedRow {
+    cash: i64,
+    guest_count: i32,
+    park_rating: i32,
+}
+
+/// Polls for the observations row written by the orchestrator's
+/// persistence worker, which runs asynchronously relative to the TCP
+/// message that triggered it.
+async fn wait_for_row(
+    pool: &sqlx::PgPool,
+    message_id: uuid::Uuid,
+    timeout: Duration,
+) -> ObservedRow {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let row = sqlx::query!(
+            "SELECT cash, guest_count, park_rating FROM observations WHERE message_id = $1",
+            message_id
+        )
+        .fetch_optional(pool)
+        .await
+        .expect("query observations");
+        if let Some(row) = row {
+            return ObservedRow {
+                cash: row.cash,
+                guest_count: row.guest_count,
+                park_rating: row.park_rating,
+            };
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("observation with message_id {message_id} was not persisted within {timeout:?}");
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+}
+
 /// Binds two ephemeral ports, drops the listeners, and starts the real
 /// orchestrator on those exact addresses -- avoids hardcoding a port that
 /// could collide across parallel test runs.
@@ -50,9 +95,16 @@ async fn spawn_orchestrator() -> (SocketAddr, SocketAddr) {
     let health_addr = health_probe.local_addr().expect("health probe local_addr");
     drop(health_probe);
 
+    let database_url = std::env::var("DATABASE_URL")
+        .expect("DATABASE_URL must be set (see .env.example) to run the integration tests");
+    let pool = db::connect(&database_url)
+        .await
+        .expect("connect to test database");
+
     let shared = new_shared();
+    let persistence = Persistence::spawn(pool, shared.clone());
     tokio::spawn(async move {
-        orchestrator::run(shared, tcp_addr, health_addr)
+        orchestrator::run(shared, persistence, tcp_addr, health_addr)
             .await
             .expect("orchestrator run");
     });
@@ -132,13 +184,23 @@ async fn full_connection_lifecycle_over_real_tcp() {
     assert_eq!(health["last_heartbeat_tick"], 12345);
     assert_eq!(health["state"], "live");
 
-    // observation.snapshot -> recorded in world-model.
+    // observation.snapshot -> recorded in world-model AND persisted to
+    // Postgres by the orchestrator's own persistence worker (not just
+    // schema-level correctness, which db_schema.rs covers separately).
     send_fixture(&mut bridge, "observation_snapshot.json").await;
     let health = wait_for_health(health_addr, Duration::from_secs(2), |h| {
         h["snapshots_recorded"] == 1
     })
     .await;
     assert_eq!(health["snapshots_recorded"], 1);
+    assert_eq!(health["db_state"], "connected");
+
+    let db_pool = pool().await;
+    let fixture_message_id: uuid::Uuid = "019f80c2-e97d-7802-af54-1970b03ff16b".parse().unwrap();
+    let observed = wait_for_row(&db_pool, fixture_message_id, Duration::from_secs(2)).await;
+    assert_eq!(observed.cash, 154302);
+    assert_eq!(observed.guest_count, 483);
+    assert_eq!(observed.park_rating, 742);
 
     // A malformed line must not crash the connection or the orchestrator --
     // the next well-formed message must still be processed.

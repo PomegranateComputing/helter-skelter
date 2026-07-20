@@ -19,6 +19,12 @@ pub enum OrchestratorError {
         #[source]
         source: serde_json::Error,
     },
+
+    #[error("database error: {0}")]
+    Db(#[from] sqlx::Error),
+
+    #[error("missing environment variable: {0}")]
+    MissingEnvVar(String),
 }
 
 /// A single rejected inbound line: malformed JSON, or a well-formed

@@ -1,0 +1,22 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: helterskelter
+      POSTGRES_PASSWORD: helterskelter
+      POSTGRES_DB: helterskelter
+    ports:
+      # Host port 5433, not the default 5432 -- this machine already has
+      # something else bound to 5432 (unrelated to this project).
+      - "5433:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U helterskelter -d helterskelter"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  db-data:

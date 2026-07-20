@@ -1,9 +1,10 @@
 use std::net::SocketAddr;
 
-use common::protocol::{Payload, PROTOCOL_VERSION};
+use common::protocol::{Envelope, Payload, PROTOCOL_VERSION};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::db::{PersistJob, Persistence};
 use crate::error::{MessageRejection, OrchestratorError};
 use crate::state::Shared;
 
@@ -11,7 +12,11 @@ use crate::state::Shared;
 /// single bridge, per docs/PROTOCOL.md: "one connection per running
 /// simulation"). When a connection ends, goes back to accepting the next
 /// one rather than exiting.
-pub async fn run(shared: Shared, addr: SocketAddr) -> Result<(), OrchestratorError> {
+pub async fn run(
+    shared: Shared,
+    persistence: Persistence,
+    addr: SocketAddr,
+) -> Result<(), OrchestratorError> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "tcp server listening");
 
@@ -23,7 +28,7 @@ pub async fn run(shared: Shared, addr: SocketAddr) -> Result<(), OrchestratorErr
             state.health.on_connect();
         }
 
-        if let Err(err) = handle_connection(&shared, socket).await {
+        if let Err(err) = handle_connection(&shared, &persistence, socket).await {
             tracing::warn!(%peer, error = %err, "connection ended with error");
         }
 
@@ -35,7 +40,11 @@ pub async fn run(shared: Shared, addr: SocketAddr) -> Result<(), OrchestratorErr
     }
 }
 
-async fn handle_connection(shared: &Shared, socket: TcpStream) -> Result<(), OrchestratorError> {
+async fn handle_connection(
+    shared: &Shared,
+    persistence: &Persistence,
+    socket: TcpStream,
+) -> Result<(), OrchestratorError> {
     let mut lines = BufReader::new(socket).lines();
 
     while let Some(line) = lines.next_line().await? {
@@ -44,7 +53,7 @@ async fn handle_connection(shared: &Shared, socket: TcpStream) -> Result<(), Orc
         }
 
         match parse_and_validate(&line) {
-            Ok(payload) => apply(shared, payload).await,
+            Ok(envelope) => apply(shared, persistence, envelope).await,
             Err(rejection) => {
                 tracing::warn!(error = %rejection, line, "rejected inbound message");
             }
@@ -54,23 +63,28 @@ async fn handle_connection(shared: &Shared, socket: TcpStream) -> Result<(), Orc
     Ok(())
 }
 
-fn parse_and_validate(line: &str) -> Result<Payload, MessageRejection> {
-    let envelope: common::protocol::Envelope = serde_json::from_str(line)?;
+fn parse_and_validate(line: &str) -> Result<Envelope, MessageRejection> {
+    let envelope: Envelope = serde_json::from_str(line)?;
     if envelope.protocol_version != PROTOCOL_VERSION {
         return Err(MessageRejection::UnsupportedProtocolVersion {
             expected: PROTOCOL_VERSION,
             actual: envelope.protocol_version,
         });
     }
-    Ok(envelope.payload)
+    Ok(envelope)
 }
 
-async fn apply(shared: &Shared, payload: Payload) {
+async fn apply(shared: &Shared, persistence: &Persistence, envelope: Envelope) {
     let mut state = shared.write().await;
-    match payload {
+    match envelope.payload {
         Payload::Hello(hello) => {
             tracing::info!(role = ?hello.role, bridge_version = hello.bridge_version, "hello received");
             state.health.on_hello();
+            persistence.submit(PersistJob::SimulationStart {
+                simulation_id: envelope.simulation_id,
+                bridge_version: hello.bridge_version,
+                openrct2_version: hello.openrct2_version,
+            });
         }
         Payload::Heartbeat(heartbeat) => {
             state.health.on_heartbeat(heartbeat.tick);
@@ -82,6 +96,16 @@ async fn apply(shared: &Shared, payload: Payload) {
                 guest_count = snapshot.guest_count,
                 "observation.snapshot received"
             );
+            let payload_json = serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null);
+            persistence.submit(PersistJob::Observation {
+                simulation_id: envelope.simulation_id,
+                message_id: envelope.message_id,
+                recorded_at: envelope.timestamp,
+                payload: payload_json,
+                cash: snapshot.cash,
+                guest_count: snapshot.guest_count as i32,
+                park_rating: snapshot.park_rating as i32,
+            });
             state.world.record_snapshot(snapshot);
         }
         // command.request/result, shutdown, ack: not sent by the bridge in

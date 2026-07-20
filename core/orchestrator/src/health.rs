@@ -6,7 +6,7 @@ use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::error::OrchestratorError;
-use crate::state::{ConnectionState, Shared};
+use crate::state::{ConnectionState, DbState, Shared};
 
 #[derive(Debug, Serialize)]
 struct HealthResponse {
@@ -15,6 +15,7 @@ struct HealthResponse {
     last_heartbeat_age_ms: Option<u128>,
     world_tick: Option<u64>,
     snapshots_recorded: usize,
+    db_state: DbState,
 }
 
 async fn health(State(shared): State<Shared>) -> Json<HealthResponse> {
@@ -30,6 +31,7 @@ async fn health(State(shared): State<Shared>) -> Json<HealthResponse> {
             .map(|t| t.elapsed().as_millis()),
         world_tick: state.world.tick(),
         snapshots_recorded: state.world.history().len(),
+        db_state: state.db_state,
     })
 }
 
