@@ -1,0 +1,9 @@
+{
+  "host": "127.0.0.1",
+  "port": 8090,
+  "heartbeatIntervalTicks": 40,
+  "snapshotIntervalTicks": 546,
+  "maxBufferedSnapshots": 5,
+  "initialReconnectDelayMs": 1000,
+  "maxReconnectDelayMs": 30000
+}
