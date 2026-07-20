@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "messages/hello.schema.json",
+  "title": "hello payload",
+  "description": "First message on a fresh connection, either direction.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["role", "bridge_version", "openrct2_version"],
+  "properties": {
+    "role": { "enum": ["bridge", "orchestrator"] },
+    "bridge_version": { "type": "string" },
+    "openrct2_version": { "type": "string" }
+  }
+}

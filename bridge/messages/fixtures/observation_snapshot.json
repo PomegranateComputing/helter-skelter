@@ -1,0 +1,44 @@
+{
+  "protocol_version": "0.1.0",
+  "message_id": "019f80c2-e97d-7802-af54-1970b03ff16b",
+  "timestamp": "2026-07-20T18:30:10Z",
+  "simulation_id": "b0b0f1c5-afb9-4fa7-8bbd-96dc0fdcfdee",
+  "kind": "observation.snapshot",
+  "payload": {
+    "park_date": { "year": 3, "month": 4, "day": 12 },
+    "cash": 154302,
+    "loan": 20000,
+    "park_rating": 742,
+    "guest_count": 483,
+    "rides": [
+      {
+        "id": 0,
+        "name": "Wild Mouse",
+        "type": "wild_mouse",
+        "status": "open",
+        "price": 3,
+        "queue_length": 12,
+        "downtime": 0
+      },
+      {
+        "id": 1,
+        "name": "Log Flume",
+        "type": "log_flume",
+        "status": "testing",
+        "price": 2,
+        "queue_length": 0,
+        "downtime": 5
+      }
+    ],
+    "staff_counts": {
+      "handyman": 4,
+      "mechanic": 2,
+      "security": 1,
+      "entertainer": 1
+    },
+    "weather": "partially_cloudy"
+  },
+  "correlation_id": null,
+  "status": "ok",
+  "error": null
+}

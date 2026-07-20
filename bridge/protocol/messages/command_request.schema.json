@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "messages/command_request.schema.json",
+  "title": "command.request payload",
+  "description": "params' deep shape depends on action and is validated against the matching schema in ../commands/ by the test harness, not by this file -- see docs/PROTOCOL.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["action", "params", "idempotency_key", "expiry_tick"],
+  "properties": {
+    "action": {
+      "enum": [
+        "set_ride_price",
+        "set_park_entry_fee",
+        "hire_staff",
+        "open_ride",
+        "close_ride"
+      ]
+    },
+    "params": { "type": "object" },
+    "idempotency_key": {
+      "description": "Client-generated key; the orchestrator must treat repeated delivery of the same key as a no-op after the first authorized execution.",
+      "type": "string",
+      "minLength": 1
+    },
+    "expiry_tick": {
+      "description": "Simulation tick after which this command is no longer valid to execute.",
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

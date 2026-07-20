@@ -1,0 +1,13 @@
+{
+  "protocol_version": "0.1.0",
+  "message_id": "019f80c2-e97d-78e9-a6da-40453fa236aa",
+  "timestamp": "2026-07-20T18:30:05Z",
+  "simulation_id": "b0b0f1c5-afb9-4fa7-8bbd-96dc0fdcfdee",
+  "kind": "heartbeat",
+  "payload": {
+    "tick": 12345
+  },
+  "correlation_id": null,
+  "status": "ok",
+  "error": null
+}

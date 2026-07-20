@@ -1,0 +1,17 @@
+{
+  "protocol_version": "0.1.0",
+  "message_id": "019f80c2-e97e-706d-828a-b3c3d0544d47",
+  "timestamp": "2026-07-20T18:30:21Z",
+  "simulation_id": "b0b0f1c5-afb9-4fa7-8bbd-96dc0fdcfdee",
+  "kind": "command.result",
+  "payload": {
+    "engine_cost": null,
+    "engine_error": {
+      "code": "ride_not_found",
+      "message": "No ride with id 1 exists in the current park."
+    }
+  },
+  "correlation_id": "019f80c2-e97d-77e7-a8aa-97a22eb6e62f",
+  "status": "error",
+  "error": null
+}
