@@ -1,0 +1,39 @@
+# Copyrighted game data — never committed. Everything under assets/gog/ is
+# ignored except this directory's own README (kept as tracked documentation).
+assets/gog/*
+!assets/gog/README.md
+
+# Large/binary game assets pulled from OpenRCT2 at runtime
+assets/openrct2/*.dat
+assets/openrct2/*.DAT
+assets/openrct2/*.zip
+
+# Runtime-generated, local-only
+runtime/
+logs/
+tmp/
+exports/
+
+# Local model weights (large binaries, not source)
+models/local/
+
+# DB snapshots — keep the directory, ignore its contents
+db/snapshots/*
+!db/snapshots/.gitkeep
+
+# Rust
+target/
+
+# Node / pnpm
+node_modules/
+dist/
+
+# Python (tooling scripts under scripts/ may use it)
+__pycache__/
+.venv/
+
+# Secrets
+.env
+
+# Session-only project scratch notes, not part of the tracked project
+HelterSkelter_Project_Overview.txt

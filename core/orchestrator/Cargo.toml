@@ -1,0 +1,10 @@
+[package]
+name = "orchestrator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+world-model = { path = "../world-model" }
+governor = { path = "../governor" }
