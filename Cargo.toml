@@ -5,6 +5,7 @@ members = [
     "core/world-model",
     "core/governor",
     "core/orchestrator",
+    "tests/integration",
 ]
 
 [workspace.package]
