@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "messages/shutdown.schema.json",
+  "title": "shutdown payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reason"],
+  "properties": {
+    "reason": {
+      "enum": ["operator_request", "fatal_error", "watchdog_timeout"]
+    }
+  }
+}

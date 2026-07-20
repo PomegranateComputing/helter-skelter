@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "commands/open_ride.schema.json",
+  "title": "open_ride params",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ride_id"],
+  "properties": {
+    "ride_id": { "type": "integer", "minimum": 0 }
+  }
+}

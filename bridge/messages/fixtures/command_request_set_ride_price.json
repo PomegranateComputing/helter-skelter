@@ -1,0 +1,16 @@
+{
+  "protocol_version": "0.1.0",
+  "message_id": "019f80c2-e97d-7771-b000-2231a90b6e2c",
+  "timestamp": "2026-07-20T18:30:15Z",
+  "simulation_id": "b0b0f1c5-afb9-4fa7-8bbd-96dc0fdcfdee",
+  "kind": "command.request",
+  "payload": {
+    "action": "set_ride_price",
+    "params": { "ride_id": 0, "price": 4 },
+    "idempotency_key": "gov-2026-07-20-0001",
+    "expiry_tick": 13000
+  },
+  "correlation_id": null,
+  "status": null,
+  "error": null
+}

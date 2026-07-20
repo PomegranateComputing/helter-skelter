@@ -1,0 +1,14 @@
+{
+  "protocol_version": "0.1.0",
+  "message_id": "019f80c2-e97d-769f-a481-fbc8e6d7ce7a",
+  "timestamp": "2026-07-20T18:30:20Z",
+  "simulation_id": "b0b0f1c5-afb9-4fa7-8bbd-96dc0fdcfdee",
+  "kind": "command.result",
+  "payload": {
+    "engine_cost": 0,
+    "engine_error": null
+  },
+  "correlation_id": "019f80c2-e97d-7771-b000-2231a90b6e2c",
+  "status": "ok",
+  "error": null
+}

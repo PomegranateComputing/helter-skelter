@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "commands/hire_staff.schema.json",
+  "title": "hire_staff params",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type"],
+  "properties": {
+    "type": { "enum": ["handyman", "mechanic", "security", "entertainer"] }
+  }
+}

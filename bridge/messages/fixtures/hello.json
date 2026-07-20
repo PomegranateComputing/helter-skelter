@@ -1,0 +1,15 @@
+{
+  "protocol_version": "0.1.0",
+  "message_id": "019f80c2-e979-7815-8997-cde5e8bc3bae",
+  "timestamp": "2026-07-20T18:30:00Z",
+  "simulation_id": "b0b0f1c5-afb9-4fa7-8bbd-96dc0fdcfdee",
+  "kind": "hello",
+  "payload": {
+    "role": "bridge",
+    "bridge_version": "0.1.0",
+    "openrct2_version": "0.4.13"
+  },
+  "correlation_id": null,
+  "status": "ok",
+  "error": null
+}

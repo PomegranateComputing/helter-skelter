@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "messages/observation_snapshot.schema.json",
+  "title": "observation.snapshot payload",
+  "description": "park_date is a structured {year,month,day} rather than an ISO calendar date because OpenRCT2's in-game calendar has 8 months per year, not the Gregorian 12 -- an ISO date-time would misrepresent it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "park_date",
+    "cash",
+    "loan",
+    "park_rating",
+    "guest_count",
+    "rides",
+    "staff_counts",
+    "weather"
+  ],
+  "properties": {
+    "park_date": { "$ref": "#/$defs/park_date" },
+    "cash": { "type": "integer" },
+    "loan": { "type": "integer", "minimum": 0 },
+    "park_rating": { "type": "integer", "minimum": 0, "maximum": 999 },
+    "guest_count": { "type": "integer", "minimum": 0 },
+    "rides": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ride" }
+    },
+    "staff_counts": { "$ref": "#/$defs/staff_counts" },
+    "weather": {
+      "enum": [
+        "sunny",
+        "partially_cloudy",
+        "cloudy",
+        "rain",
+        "heavy_rain",
+        "thunder",
+        "snow",
+        "heavy_snow"
+      ]
+    }
+  },
+  "$defs": {
+    "park_date": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["year", "month", "day"],
+      "properties": {
+        "year": { "type": "integer", "minimum": 1 },
+        "month": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "day": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "ride": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "type", "status", "price", "queue_length", "downtime"],
+      "properties": {
+        "id": { "type": "integer", "minimum": 0 },
+        "name": { "type": "string" },
+        "type": { "type": "string" },
+        "status": { "enum": ["open", "closed", "testing"] },
+        "price": { "type": "integer", "minimum": 0 },
+        "queue_length": { "type": "integer", "minimum": 0 },
+        "downtime": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "staff_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["handyman", "mechanic", "security", "entertainer"],
+      "properties": {
+        "handyman": { "type": "integer", "minimum": 0 },
+        "mechanic": { "type": "integer", "minimum": 0 },
+        "security": { "type": "integer", "minimum": 0 },
+        "entertainer": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

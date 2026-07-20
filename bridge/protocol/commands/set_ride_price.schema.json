@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "commands/set_ride_price.schema.json",
+  "title": "set_ride_price params",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ride_id", "price"],
+  "properties": {
+    "ride_id": { "type": "integer", "minimum": 0 },
+    "price": { "type": "integer", "minimum": 0 }
+  }
+}

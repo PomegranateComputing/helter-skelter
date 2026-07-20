@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "messages/ack.schema.json",
+  "title": "ack payload",
+  "description": "Empty on purpose -- an ack's meaning is entirely carried by the envelope's mandatory correlation_id (the message_id being acknowledged).",
+  "type": "object",
+  "additionalProperties": false
+}

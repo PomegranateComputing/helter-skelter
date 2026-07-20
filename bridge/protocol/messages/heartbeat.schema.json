@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "messages/heartbeat.schema.json",
+  "title": "heartbeat payload",
+  "description": "tick is monotonically non-decreasing across a connection; that invariant is enforced by the orchestrator, not expressible in a single-message schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tick"],
+  "properties": {
+    "tick": { "type": "integer", "minimum": 0 }
+  }
+}
