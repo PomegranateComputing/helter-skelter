@@ -1,0 +1,42 @@
+# Governor policy for milestone 0.1. Read by core/governor at orchestrator
+# startup. Every field here is a hard constraint the governor checks in
+# core/governor/src/lib.rs's authorize() -- see docs/DECISIONS.md ADR-0004
+# and docs/VISION.md's constitutional priorities.
+policy_version: "0.1.0"
+
+# Max number of authorized actions per rolling 24h window, across all
+# rides/action types.
+daily_action_budget: 20
+
+# Max authorized actions per rolling 1h window (a tighter, faster-tripping
+# limit than the daily budget).
+max_actions_per_hour: 10
+
+# A proposal's confidence must be >= this to even be considered.
+min_confidence: 0.6
+
+# set_ride_price is only ever authorized within this range (inclusive).
+price_bounds:
+  min: 0
+  max: 20
+
+# After a ride's price changes, no further price-change proposal for that
+# same ride is authorized until this many ticks have passed.
+per_ride_cooldown_ticks: 2000
+
+# --- The Operator's rule thresholds (core/orchestrator's operator.rs) ---
+# These aren't governor constraints -- they're when The Operator proposes
+# something in the first place, before the governor ever sees it.
+
+# Ride queue_length strictly above this, for `consecutive_snapshots_required`
+# snapshots in a row, proposes a one-`price_step` price increase.
+queue_length_high_threshold: 5
+
+# Ride queue_length at or below this, for `consecutive_snapshots_required`
+# snapshots in a row, proposes a one-`price_step` price decrease (floored
+# at price_bounds.min).
+queue_length_low_threshold: 0
+
+consecutive_snapshots_required: 2
+
+price_step: 1

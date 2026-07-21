@@ -1,11 +1,12 @@
 /**
  * Owns the TCP connection to the orchestrator: connect, hello, buffered
- * send, and reconnect-with-backoff. No business logic and no parsing of
- * inbound data beyond logging it -- this milestone is observe/transmit
- * only (core/orchestrator is the one making decisions).
+ * send, reconnect-with-backoff, and inbound NDJSON line framing. Dispatches
+ * parsed command.request envelopes to the caller-supplied handler --
+ * interpreting *what* a command means (commands.ts) stays out of this
+ * module, which only owns the wire.
  */
 import type { BridgeConfig } from "./config";
-import type { Envelope, Hello, Payload } from "./protocol";
+import type { CommandResult, Envelope, Hello, Payload } from "./protocol";
 import { PROTOCOL_VERSION } from "./protocol";
 import { randomUuidV7 } from "./uuid";
 
@@ -22,17 +23,22 @@ function makeEnvelope(simulationId: string, kindPayload: Payload): Envelope {
   } as Envelope;
 }
 
+export type CommandRequestHandler = (envelope: Envelope & { kind: "command.request" }) => void;
+
 export class BridgeConnection {
   private readonly config: BridgeConfig;
   private readonly simulationId: string;
+  private readonly onCommandRequest: CommandRequestHandler;
   private socket: Socket | null = null;
   private connected = false;
   private reconnectDelayMs: number;
   private readonly snapshotBuffer: string[] = [];
+  private inboundBuffer = "";
 
-  constructor(config: BridgeConfig, simulationId: string) {
+  constructor(config: BridgeConfig, simulationId: string, onCommandRequest: CommandRequestHandler) {
     this.config = config;
     this.simulationId = simulationId;
+    this.onCommandRequest = onCommandRequest;
     this.reconnectDelayMs = config.initialReconnectDelayMs;
   }
 
@@ -59,6 +65,14 @@ export class BridgeConnection {
         this.snapshotBuffer.shift();
       }
     }
+  }
+
+  /** Sends a command.result correlated back to the command.request that triggered it. */
+  sendCommandResult(correlationId: string, result: CommandResult): void {
+    const envelope = makeEnvelope(this.simulationId, { kind: "command.result", payload: result });
+    envelope.correlation_id = correlationId;
+    envelope.status = result.engine_error ? "error" : "ok";
+    this.write(envelope);
   }
 
   private connect(): void {
@@ -89,10 +103,37 @@ export class BridgeConnection {
   }
 
   private onData(data: string): void {
-    // Observe/transmit only in this milestone -- inbound messages (acks,
-    // command.request from the orchestrator) are not yet acted on. Logged
-    // so a human can see traffic during development.
-    console.log(`[bridge] received: ${data}`);
+    // TCP delivers a byte stream, not necessarily one "data" event per
+    // NDJSON line -- buffer and split on "\n", keeping any incomplete
+    // trailing fragment for the next event.
+    this.inboundBuffer += data;
+    let newlineIndex = this.inboundBuffer.indexOf("\n");
+    while (newlineIndex !== -1) {
+      const line = this.inboundBuffer.slice(0, newlineIndex);
+      this.inboundBuffer = this.inboundBuffer.slice(newlineIndex + 1);
+      if (line.trim().length > 0) {
+        this.handleLine(line);
+      }
+      newlineIndex = this.inboundBuffer.indexOf("\n");
+    }
+  }
+
+  private handleLine(line: string): void {
+    let envelope: Envelope;
+    try {
+      envelope = JSON.parse(line) as Envelope;
+    } catch (err) {
+      console.log(`[bridge] received unparseable line: ${String(err)}`);
+      return;
+    }
+
+    if (envelope.kind === "command.request") {
+      this.onCommandRequest(envelope as Envelope & { kind: "command.request" });
+    } else {
+      // shutdown/ack: not yet acted on in this milestone. Logged so a
+      // human can see traffic during development.
+      console.log(`[bridge] received: ${line}`);
+    }
   }
 
   private onClose(): void {

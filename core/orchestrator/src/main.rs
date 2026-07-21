@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::path::Path;
 
+use governor::Constitution;
 use orchestrator::{config, db, new_shared, OrchestratorError, Persistence};
 
 /// Health endpoint port. Not read from config/bridge.json (that file is
@@ -20,13 +21,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tcp_addr: SocketAddr = format!("{}:{}", bridge_config.host, bridge_config.port).parse()?;
     let health_addr: SocketAddr = format!("{}:{}", bridge_config.host, HEALTH_PORT).parse()?;
 
+    let constitution = Constitution::load(Path::new("config/constitution-0.1.yaml"))?;
+
     let database_url = std::env::var("DATABASE_URL")
         .map_err(|_| OrchestratorError::MissingEnvVar("DATABASE_URL".to_string()))?;
     let pool = db::connect(&database_url).await?;
 
-    let shared = new_shared();
-    let persistence = Persistence::spawn(pool, shared.clone());
-    orchestrator::run(shared, persistence, tcp_addr, health_addr).await?;
+    let shared = new_shared(constitution);
+    let persistence = Persistence::spawn(pool.clone(), shared.clone());
+    orchestrator::run(shared, persistence, pool, tcp_addr, health_addr).await?;
 
     Ok(())
 }

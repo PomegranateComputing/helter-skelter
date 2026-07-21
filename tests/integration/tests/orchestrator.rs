@@ -101,10 +101,15 @@ async fn spawn_orchestrator() -> (SocketAddr, SocketAddr) {
         .await
         .expect("connect to test database");
 
-    let shared = new_shared();
-    let persistence = Persistence::spawn(pool, shared.clone());
+    let constitution_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/constitution-0.1.yaml");
+    let constitution =
+        governor::Constitution::load(&constitution_path).expect("load constitution-0.1.yaml");
+
+    let shared = new_shared(constitution);
+    let persistence = Persistence::spawn(pool.clone(), shared.clone());
     tokio::spawn(async move {
-        orchestrator::run(shared, persistence, tcp_addr, health_addr)
+        orchestrator::run(shared, persistence, pool, tcp_addr, health_addr)
             .await
             .expect("orchestrator run");
     });

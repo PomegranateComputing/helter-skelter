@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use governor::{Constitution, Governor};
 use serde::Serialize;
 use tokio::sync::RwLock;
 use world_model::WorldModel;
@@ -110,22 +111,22 @@ pub struct SharedState {
     pub health: ConnectionHealth,
     pub world: WorldModel,
     pub db_state: DbState,
-}
-
-impl Default for SharedState {
-    fn default() -> Self {
-        Self {
-            health: ConnectionHealth::default(),
-            world: WorldModel::new(),
-            db_state: DbState::default(),
-        }
-    }
+    pub governor: Governor,
 }
 
 pub type Shared = Arc<RwLock<SharedState>>;
 
-pub fn new_shared() -> Shared {
-    Arc::new(RwLock::new(SharedState::default()))
+/// Governor state (rate-limit/cooldown tracking) lives here rather than
+/// being reconstructed per-connection, so it survives a bridge
+/// reconnect -- only an orchestrator restart resets it (a known 0.1
+/// simplification, see docs/DECISIONS.md ADR-0004).
+pub fn new_shared(constitution: Constitution) -> Shared {
+    Arc::new(RwLock::new(SharedState {
+        health: ConnectionHealth::default(),
+        world: WorldModel::new(),
+        db_state: DbState::default(),
+        governor: Governor::new(constitution),
+    }))
 }
 
 #[cfg(test)]
