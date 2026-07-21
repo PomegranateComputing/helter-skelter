@@ -1,3 +1,4 @@
+import { handleCommandRequest } from "./commands";
 import { bridgeConfig } from "./config";
 import { BridgeConnection } from "./connection";
 import { buildObservationSnapshot } from "./observation";
@@ -15,7 +16,14 @@ registerPlugin({
   targetApiVersion: 115,
   main() {
     const simulationId = randomUuidV7();
-    const connection = new BridgeConnection(bridgeConfig, simulationId);
+    const connection = new BridgeConnection(bridgeConfig, simulationId, (envelope) => {
+      // Never let a bad command crash the game -- the query/execute split
+      // itself already contains engine errors in the result; this catches
+      // anything unexpected in the handling around it.
+      handleCommandRequest(envelope.payload)
+        .then((result) => connection.sendCommandResult(envelope.message_id, result))
+        .catch((err) => console.log(`[bridge] command handling error: ${String(err)}`));
+    });
     connection.start();
 
     context.subscribe("interval.tick", () => {

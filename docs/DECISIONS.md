@@ -214,3 +214,102 @@ AFK safety-state machine (`NORMAL`/`CAUTIOUS`/`CONSERVATION`/`QUARANTINE`/
   need to reconcile with this ADR's narrower `db_state` flag rather than
   design against a blank slate — check `core/orchestrator/src/state.rs`'s
   `DbState` and `db.rs`'s retry loop first.
+
+---
+
+## ADR-0004: Operator slice — the first real decision pipeline (set_ride_price)
+
+- Status: accepted
+- Date: 2026-07-20
+
+### Context
+
+This milestone's task was to wire one full decision loop end to end —
+snapshot → deterministic rule → proposal → authorization → query/execute
+→ result → persisted outcome — for exactly one bounded command,
+`set_ride_price`, with no LLM anywhere in it. The task description didn't
+settle where the new proposal/authorization/governor types should live,
+how "query then execute" maps onto the bridge's actual plugin API, how
+in-memory governor state should behave across orchestrator restarts, or
+how to keep `idempotency_key` unique under the schema's constraints —
+each needed a call.
+
+### Decision
+
+1. **`core/governor` owns `Proposal`, `Authorization`, `Decision`, and
+   `Constitution`, not `core/orchestrator`.** The rule engine
+   (`core/orchestrator/src/operator.rs`) constructs `Proposal`s but the
+   types themselves belong with the policy that judges them — a future
+   second rule-emitting agent (0.2+) should depend on `governor`'s types
+   the same way `operator.rs` does, not duplicate them.
+2. **Query then execute is one synchronous round trip inside a single
+   `command.request`/`command.result` exchange, not two separate wire
+   messages.** `bridge/openrct2-plugin/src/commands.ts`'s
+   `handleCommandRequest` calls `context.queryAction` and, only if it
+   reports no error, `context.executeAction`, and returns one
+   `command.result` either way. The orchestrator never sees a
+   query-only round trip — it authorizes once, sends one
+   `command.request`, and gets back one outcome. This keeps the
+   protocol's correlation model (one request, one correlated result)
+   intact rather than inventing a second request/response pair just for
+   this milestone.
+3. **The governor's rate-limit and cooldown state is in-memory only,
+   reset on orchestrator restart — not persisted.** Every individual
+   authorization decision *is* durably persisted (`authorizations` rows
+   with `reason` and `policy_version`), so the ledger itself is never
+   incomplete; what resets is only the governor's own bookkeeping (hourly/
+   daily counters, per-ride cooldown timestamps) used to make the *next*
+   decision. Rebuilding that bookkeeping from the ledger on startup is
+   real work (replaying wall-clock-scoped budgets against
+   simulation-tick-scoped cooldowns) that this milestone's scope — one
+   command type, no restart-survival requirement in the task — doesn't
+   justify yet. A restart mid-day currently resets the daily/hourly
+   budget early; flagged here so it isn't mistaken for an oversight
+   later.
+4. **`idempotency_key` is scoped by `simulation_id`, not just
+   `ride_id`+tick.** The schema enforces a single global `UNIQUE`
+   constraint on `actions.idempotency_key` (no per-simulation scoping),
+   but `current_tick` legitimately repeats across simulations (it
+   defaults to 0 until a simulation's first heartbeat arrives). Keying
+   only on `ride_id`+tick produced identical keys across independent
+   simulation runs and collided against the constraint — a real bug this
+   design hit during integration testing, not a hypothetical. The key is
+   now `operator-sim{simulation_id}-ride{ride_id}-tick{current_tick}`.
+5. **`insert_simulation_start` is synchronous, not routed through the
+   buffered `Persistence` worker used for observations.** Every row in
+   the decision pipeline foreign-keys to `simulations`, so if that row's
+   insert is buffered and hasn't landed yet when the very next
+   `observation.snapshot` tries to insert a `proposals` row against the
+   same `simulation_id`, the proposal insert fails with a foreign-key
+   violation depending on how the two async tasks happen to interleave —
+   again a real bug hit during integration testing (see `db.rs`'s module
+   doc comment). The general rule this establishes: a table other tables
+   foreign-key to must be written synchronously if the writer expects to
+   insert dependents against it in the same logical flow; buffered writes
+   stay safe only for leaf data with no same-request dependents.
+
+### Consequences
+
+- Any 0.2+ rule-proposing agent should live alongside `operator.rs` in
+  `core/orchestrator` and import its proposal/authorization types from
+  `core/governor`, not redefine them.
+- A future milestone that needs authorization decisions to survive a
+  restart (or needs multiple orchestrator instances sharing one
+  governor's rate limits) will need to change the governor's state from
+  in-memory to persisted/shared — this ADR's point 3 is the explicit
+  marker for where that work starts.
+- The real end-to-end proof run for this milestone could only exercise
+  the price-*decrease* branch of the operator rule, not the increase
+  branch: the bridge's `queue_length` field is a hardcoded `0` placeholder
+  (no OpenRCT2 API exposes real ride queue length yet — see
+  `docs/OPENRCT2_INTEGRATION.md`'s GAPS section), so "queue too long" can
+  never be observed for real, while "queue empty" is trivially always
+  true. The dev park's rides also start at `price: 0`, which is already
+  the configured floor, so a one-off local plugin was used to seed both
+  rides to a non-zero price before the real run so the decrease had room
+  to fire; that seeding plugin is not part of the committed bridge. The
+  increase branch is proven only by `core/orchestrator/src/operator.rs`'s
+  and `tests/integration/tests/operator_slice.rs`'s unit/integration
+  tests, which construct synthetic high-queue snapshots directly — not by
+  a live OpenRCT2 run. This gap closes only once a real queue-length
+  source exists in the engine or bridge.
