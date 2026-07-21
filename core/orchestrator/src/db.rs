@@ -257,3 +257,77 @@ pub async fn insert_action_result(
     .await?;
     Ok(())
 }
+
+/// The most recent snapshot recorded for `simulation_id`, if any -- used
+/// by `crate::snapshot::ensure_recent_snapshot` to decide whether a fresh
+/// one is needed before authorizing an action.
+pub async fn latest_snapshot(
+    pool: &PgPool,
+    simulation_id: Uuid,
+) -> Result<Option<(Uuid, i64)>, sqlx::Error> {
+    let row = sqlx::query!(
+        "SELECT id, tick FROM snapshots WHERE simulation_id = $1 ORDER BY created_at DESC LIMIT 1",
+        simulation_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| (r.id, r.tick)))
+}
+
+pub async fn insert_snapshot(
+    pool: &PgPool,
+    simulation_id: Uuid,
+    kind: &str,
+    storage_path: &str,
+    tick: u64,
+) -> Result<Uuid, sqlx::Error> {
+    sqlx::query_scalar!(
+        "INSERT INTO snapshots (simulation_id, kind, storage_path, tick) VALUES ($1, $2, $3, $4) RETURNING id",
+        simulation_id,
+        kind,
+        storage_path,
+        tick as i64,
+    )
+    .fetch_one(pool)
+    .await
+}
+
+pub struct SnapshotRow {
+    pub simulation_id: Uuid,
+    pub storage_path: String,
+    pub tick: i64,
+}
+
+/// Looks up a snapshot by id -- used by the `orchestrator rollback --to`
+/// CLI subcommand to resolve which file to restore.
+pub async fn find_snapshot(
+    pool: &PgPool,
+    snapshot_id: Uuid,
+) -> Result<Option<SnapshotRow>, sqlx::Error> {
+    let row = sqlx::query_as!(
+        SnapshotRow,
+        "SELECT simulation_id, storage_path, tick FROM snapshots WHERE id = $1",
+        snapshot_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+pub async fn insert_rollback(
+    pool: &PgPool,
+    simulation_id: Uuid,
+    snapshot_id: Uuid,
+    reason: &str,
+    triggered_by: &str,
+) -> Result<Uuid, sqlx::Error> {
+    sqlx::query_scalar!(
+        "INSERT INTO rollbacks (simulation_id, snapshot_id, reason, triggered_by) VALUES ($1, $2, $3, $4) RETURNING id",
+        simulation_id,
+        snapshot_id,
+        reason,
+        triggered_by,
+    )
+    .fetch_one(pool)
+    .await
+}

@@ -25,6 +25,12 @@ pub enum OrchestratorError {
 
     #[error("missing environment variable: {0}")]
     MissingEnvVar(String),
+
+    #[error("snapshot script {script} failed: {stderr}")]
+    SnapshotScriptFailed { script: String, stderr: String },
+
+    #[error("snapshot {0} not found")]
+    SnapshotNotFound(uuid::Uuid),
 }
 
 /// A single rejected inbound line: malformed JSON, or a well-formed

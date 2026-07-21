@@ -7,13 +7,23 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use orchestrator::{db, new_shared, Persistence};
+use orchestrator::{db, new_shared, Persistence, SnapshotConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::sleep;
 
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bridge/messages/fixtures")
+}
+
+/// No real OpenRCT2 process runs in these tests, so there's no real
+/// autosave for scripts/dev/snapshot.sh to copy -- fake-snapshot.sh
+/// stands in, writing an empty placeholder instead (see its doc comment).
+fn test_snapshot_config() -> SnapshotConfig {
+    SnapshotConfig {
+        script_path: Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/fake-snapshot.sh"),
+        checkpoint_root: std::env::temp_dir().join("helter-skelter-test-checkpoints"),
+    }
 }
 
 /// Fixtures on disk are pretty-printed (multi-line) for human readability,
@@ -109,9 +119,16 @@ async fn spawn_orchestrator() -> (SocketAddr, SocketAddr) {
     let shared = new_shared(constitution);
     let persistence = Persistence::spawn(pool.clone(), shared.clone());
     tokio::spawn(async move {
-        orchestrator::run(shared, persistence, pool, tcp_addr, health_addr)
-            .await
-            .expect("orchestrator run");
+        orchestrator::run(
+            shared,
+            persistence,
+            pool,
+            tcp_addr,
+            health_addr,
+            test_snapshot_config(),
+        )
+        .await
+        .expect("orchestrator run");
     });
 
     // Give the listeners a moment to actually bind before the test connects.

@@ -26,6 +26,9 @@ pub struct Constitution {
     pub queue_length_low_threshold: u32,
     pub consecutive_snapshots_required: usize,
     pub price_step: i64,
+    pub snapshot_max_age_ticks: u64,
+    pub max_unexpected_cash_drop: i64,
+    pub conservation_ticks: u64,
 }
 
 impl Constitution {
