@@ -20,7 +20,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use governor::{Authorization, Decision, Proposal};
+use governor::{Authorization, Decision, Proposal, SafetyState};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
@@ -38,9 +38,21 @@ const BUFFER_CAPACITY: usize = 500;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(500);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 
+/// A short `acquire_timeout` (sqlx's default is 30s) matters here more
+/// than it would in a typical web service: a real DB outage chaos test
+/// caught every heartbeat-triggered query blocking the *entire* bridge
+/// connection's message loop for 30s each while Postgres was down --
+/// nothing else on that connection (including the next
+/// observation.snapshot) could be processed until each one timed out,
+/// which is exactly the "DB outage degrades, never blocks" guarantee
+/// ADR-0003 established for the buffered Persistence worker, quietly
+/// broken for every *synchronous* query added since.
+const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(3);
+
 pub async fn connect(database_url: &str) -> Result<PgPool, OrchestratorError> {
     PgPoolOptions::new()
         .max_connections(5)
+        .acquire_timeout(ACQUIRE_TIMEOUT)
         .connect(database_url)
         .await
         .map_err(OrchestratorError::Db)
@@ -219,25 +231,57 @@ pub async fn insert_authorization(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_action(
     pool: &PgPool,
     authorization_id: Uuid,
     command: &Value,
     idempotency_key: &str,
     expiry_tick: u64,
+    tick: u64,
 ) -> Result<Uuid, sqlx::Error> {
     sqlx::query_scalar!(
         r#"
-        INSERT INTO actions (authorization_id, command, idempotency_key, expiry_tick)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO actions (authorization_id, command, idempotency_key, expiry_tick, tick)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING id
         "#,
         authorization_id,
         command,
         idempotency_key,
         expiry_tick as i64,
+        tick as i64,
     )
     .fetch_one(pool)
+    .await
+}
+
+pub struct InFlightAction {
+    pub action_id: Uuid,
+    pub idempotency_key: String,
+}
+
+/// Actions with no recorded `action_result` -- either still genuinely in
+/// flight (rare, since results usually arrive within milliseconds) or,
+/// far more likely on a restart, orphaned by a crash between sending the
+/// `command.request` and receiving its `command.result`. Their outcome is
+/// unknown; `idempotency_key` prevents ever double-executing them if a
+/// future proposal happens to regenerate the same key, but there is no
+/// mechanism to resume or query their result after the fact -- see
+/// docs/DECISIONS.md ADR-0006's crash-recovery section for why entering
+/// `Cautious` is the response, not an attempt to reconcile these
+/// individually.
+pub async fn find_in_flight_actions(pool: &PgPool) -> Result<Vec<InFlightAction>, sqlx::Error> {
+    sqlx::query_as!(
+        InFlightAction,
+        r#"
+        SELECT ac.id AS "action_id!", ac.idempotency_key AS "idempotency_key!"
+        FROM actions ac
+        LEFT JOIN action_results ar ON ar.action_id = ac.id
+        WHERE ar.id IS NULL
+        "#
+    )
+    .fetch_all(pool)
     .await
 }
 
@@ -329,5 +373,208 @@ pub async fn insert_rollback(
         triggered_by,
     )
     .fetch_one(pool)
+    .await
+}
+
+// --- Phase 8: the AFK safety-state machine -------------------------------
+//
+// The current state is derived by reading the latest row in
+// `state_transitions`, not held as separate mutable state -- see
+// docs/DECISIONS.md ADR-0006. `current_safety_state` is the one place
+// that reads it, and it's self-healing: an expired Conservation window is
+// resolved back to Normal (with its own logged transition) the moment
+// anyone asks, rather than needing a background sweep.
+
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_state_transition(
+    pool: &PgPool,
+    simulation_id: Option<Uuid>,
+    from_state: SafetyState,
+    to_state: SafetyState,
+    reason: &str,
+    triggered_by: &str,
+    expires_at_tick: Option<u64>,
+) -> Result<Uuid, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        INSERT INTO state_transitions (simulation_id, from_state, to_state, reason, triggered_by, expires_at_tick)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id
+        "#,
+        simulation_id,
+        from_state.as_str(),
+        to_state.as_str(),
+        reason,
+        triggered_by,
+        expires_at_tick.map(|t| t as i64),
+    )
+    .fetch_one(pool)
+    .await
+}
+
+/// The safety state right now, evaluated against `current_tick` and
+/// scoped to `simulation_id`: the latest row that's either for this
+/// simulation specifically or has no simulation_id at all (a transition
+/// recorded before any bridge connected -- crash-recovery's startup
+/// `Cautious`, or a watchdog check run with no simulation currently
+/// live). This scoping matters, not just for test isolation: a rollback
+/// triggered by *this* simulation's action must never bleed into a
+/// different (e.g. later, or concurrently-tested) simulation's
+/// authorization decisions.
+///
+/// A `Conservation` row whose `expires_at_tick` has passed is resolved
+/// back to `Normal` here (logging that recovery as its own transition)
+/// rather than reported stale -- callers never need to separately check
+/// "but has it expired since."
+pub async fn current_safety_state(
+    pool: &PgPool,
+    simulation_id: Option<Uuid>,
+    current_tick: u64,
+) -> Result<SafetyState, sqlx::Error> {
+    struct Row {
+        to_state: String,
+        expires_at_tick: Option<i64>,
+    }
+    let row = match simulation_id {
+        Some(sim_id) => {
+            sqlx::query_as!(
+                Row,
+                r#"
+                SELECT to_state, expires_at_tick FROM state_transitions
+                WHERE simulation_id = $1 OR simulation_id IS NULL
+                ORDER BY created_at DESC LIMIT 1
+                "#,
+                sim_id
+            )
+            .fetch_optional(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as!(
+                Row,
+                r#"
+                SELECT to_state, expires_at_tick FROM state_transitions
+                WHERE simulation_id IS NULL
+                ORDER BY created_at DESC LIMIT 1
+                "#
+            )
+            .fetch_optional(pool)
+            .await?
+        }
+    };
+
+    let Some(row) = row else {
+        return Ok(SafetyState::Normal);
+    };
+    // Every row this module writes uses SafetyState::as_str(), so this
+    // only fails if the database was written to by something else --
+    // treat that as "assume the worst" rather than panicking.
+    let state = SafetyState::parse(&row.to_state).unwrap_or(SafetyState::Stopped);
+
+    if state == SafetyState::Conservation {
+        if let Some(expires_at_tick) = row.expires_at_tick {
+            if current_tick as i64 >= expires_at_tick {
+                insert_state_transition(
+                    pool,
+                    simulation_id,
+                    SafetyState::Conservation,
+                    SafetyState::Normal,
+                    &format!("conservation window expired at tick {expires_at_tick}"),
+                    "orchestrator",
+                    None,
+                )
+                .await?;
+                return Ok(SafetyState::Normal);
+            }
+        }
+    }
+
+    Ok(state)
+}
+
+// --- Watchdog queries -----------------------------------------------------
+//
+// Both queries below are scoped to one simulation, not global across the
+// whole `actions` table: a watchdog check must react to what *this*
+// simulation's operator is doing, not to stale actions left over from a
+// previous, unrelated simulation still sitting in the ledger (the same
+// cross-simulation leak `current_safety_state` had to be fixed for).
+
+/// The most recently started simulation -- what the watchdog checks
+/// against when it isn't itself told which one is "current" (it isn't
+/// connected to the bridge and has no other way to know).
+pub async fn latest_simulation_id(pool: &PgPool) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar!("SELECT id FROM simulations ORDER BY started_at DESC LIMIT 1")
+        .fetch_optional(pool)
+        .await
+}
+
+/// Actions authorized in the last minute for `simulation_id` -- the
+/// watchdog's runaway-action circuit breaker
+/// (`action_rate_stopped_threshold_per_minute`) counts against this, not
+/// `max_actions_per_hour` (the governor's own, much gentler rate limit).
+pub async fn actions_in_last_minute(
+    pool: &PgPool,
+    simulation_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT COUNT(*) AS "count!"
+        FROM actions ac
+        JOIN authorizations a ON a.id = ac.authorization_id
+        JOIN proposals p ON p.id = a.proposal_id
+        WHERE p.simulation_id = $1 AND ac.created_at >= now() - interval '1 minute'
+        "#,
+        simulation_id,
+    )
+    .fetch_one(pool)
+    .await
+}
+
+pub struct RidePriceChange {
+    pub ride_id: i64,
+    pub price: i64,
+    pub tick: i64,
+}
+
+/// Every `set_ride_price` action for `simulation_id` within `window_ticks`
+/// of that simulation's most recent action, ordered by tick -- the
+/// watchdog groups these by `ride_id` and feeds each ride's price
+/// sequence to `crate::oscillation::count_reversals`. Windowed against
+/// the simulation's own latest action tick (not some independently-
+/// tracked "current tick" -- there is no such thing queryable from the
+/// database: ticks only ever arrive on `heartbeat`, which isn't persisted
+/// anywhere, so the actions under analysis are the only tick source this
+/// check needs).
+pub async fn recent_price_changes(
+    pool: &PgPool,
+    simulation_id: Uuid,
+    window_ticks: u64,
+) -> Result<Vec<RidePriceChange>, sqlx::Error> {
+    sqlx::query_as!(
+        RidePriceChange,
+        r#"
+        SELECT
+            (ac.command->'params'->>'ride_id')::bigint AS "ride_id!",
+            (ac.command->'params'->>'price')::bigint AS "price!",
+            ac.tick AS "tick!"
+        FROM actions ac
+        JOIN authorizations a ON a.id = ac.authorization_id
+        JOIN proposals p ON p.id = a.proposal_id
+        WHERE p.simulation_id = $1
+          AND ac.command->>'action' = 'set_ride_price'
+          AND ac.tick >= (
+              SELECT COALESCE(MAX(ac2.tick), 0)
+              FROM actions ac2
+              JOIN authorizations a2 ON a2.id = ac2.authorization_id
+              JOIN proposals p2 ON p2.id = a2.proposal_id
+              WHERE p2.simulation_id = $1
+          ) - $2
+        ORDER BY ac.tick ASC
+        "#,
+        simulation_id,
+        window_ticks as i64,
+    )
+    .fetch_all(pool)
     .await
 }

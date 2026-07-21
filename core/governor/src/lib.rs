@@ -8,14 +8,14 @@
 mod authorization;
 mod constitution;
 mod error;
-mod mode;
 mod proposal;
+mod safety_state;
 
 pub use authorization::{Authorization, Decision};
 pub use constitution::{Constitution, PriceBounds};
 pub use error::GovernorError;
-pub use mode::Mode;
 pub use proposal::Proposal;
+pub use safety_state::SafetyState;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -26,11 +26,16 @@ const ONE_DAY: Duration = Duration::from_secs(24 * 3600);
 /// Tracks enough state to enforce rate limits and cooldowns across calls.
 /// This state is in-memory only and does not survive an orchestrator
 /// restart -- a known 0.1 simplification, see docs/DECISIONS.md ADR-0004.
+/// The system-wide [`SafetyState`] gate (Normal/Cautious/Conservation/
+/// Quarantine/Rollback/Stopped) is deliberately *not* tracked here --
+/// see docs/DECISIONS.md ADR-0006 for why that moved to being backed by
+/// Postgres (core/orchestrator/src/db.rs's `latest_safety_state`) and
+/// checked by the caller before `authorize` is ever invoked, rather than
+/// being in-memory governor state like phase 7's `Mode` was.
 pub struct Governor {
     constitution: Constitution,
     authorized_at: Vec<Instant>,
     per_ride_last_authorized_tick: HashMap<u32, u64>,
-    mode: Mode,
 }
 
 impl Governor {
@@ -39,7 +44,6 @@ impl Governor {
             constitution,
             authorized_at: Vec::new(),
             per_ride_last_authorized_tick: HashMap::new(),
-            mode: Mode::Normal,
         }
     }
 
@@ -51,41 +55,16 @@ impl Governor {
         &self.constitution.policy_version
     }
 
-    pub fn mode(&self) -> Mode {
-        self.mode
-    }
-
-    /// Enters `Mode::Conservation` for `constitution.conservation_ticks`
-    /// ticks from `current_tick` -- called after an automatic rollback
-    /// trigger (core/orchestrator/src/tcp_server.rs). Idempotent in the
-    /// sense that re-entering while already in conservation just resets
-    /// the window from `current_tick`, it never shortens it.
-    pub fn enter_conservation(&mut self, current_tick: u64) {
-        self.mode = Mode::Conservation {
-            until_tick: current_tick + self.constitution.conservation_ticks,
-        };
-    }
-
     /// Checks `proposal` against every constraint in the constitution, in
     /// order, returning the first failing reason -- or an authorization if
     /// all pass. `current_tick` is the simulation tick the proposal was
     /// made at (used for the per-ride cooldown, which is a simulation-time
     /// concept; the hourly/daily budgets are wall-clock, since "per hour"
-    /// doesn't make sense at variable game speed).
+    /// doesn't make sense at variable game speed). Callers must check the
+    /// current `SafetyState` themselves first -- see this struct's doc
+    /// comment.
     pub fn authorize(&mut self, proposal: &Proposal, current_tick: u64) -> Authorization {
         let policy_version = self.constitution.policy_version.clone();
-
-        if let Mode::Conservation { until_tick } = self.mode {
-            if current_tick < until_tick {
-                return self.reject(
-                    policy_version,
-                    format!(
-                        "conservation mode active until tick {until_tick} (following an automatic rollback)"
-                    ),
-                );
-            }
-            self.mode = Mode::Normal;
-        }
 
         if proposal.confidence < self.constitution.min_confidence {
             return self.reject(
@@ -190,6 +169,12 @@ mod tests {
             snapshot_max_age_ticks: 2000,
             max_unexpected_cash_drop: 1000,
             conservation_ticks: 4000,
+            cautious_recovery_heartbeats: 2,
+            oscillation_window_ticks: 5000,
+            oscillation_max_reversals: 3,
+            db_unreachable_stopped_after_secs: 60,
+            watchdog_poll_interval_secs: 5,
+            action_rate_stopped_threshold_per_minute: 20,
         }
     }
 
@@ -307,36 +292,5 @@ mod tests {
         let auth = gov.authorize(&proposal(0, 5, 0.1), 0);
         assert_eq!(auth.decision, Decision::Rejected);
         assert!(!auth.reason.is_empty());
-    }
-
-    #[test]
-    fn conservation_mode_rejects_every_proposal_until_it_expires() {
-        let mut gov = Governor::new(constitution());
-        gov.enter_conservation(100);
-        assert_eq!(gov.mode(), Mode::Conservation { until_tick: 4100 });
-
-        let auth = gov.authorize(&proposal(0, 5, 0.8), 200);
-        assert_eq!(auth.decision, Decision::Rejected);
-        assert!(auth.reason.contains("conservation"));
-
-        // A different, otherwise-perfectly-fine ride is rejected too --
-        // conservation is global, not per-ride.
-        let auth = gov.authorize(&proposal(1, 5, 0.8), 4000);
-        assert_eq!(auth.decision, Decision::Rejected);
-    }
-
-    #[test]
-    fn conservation_mode_expires_and_reverts_to_normal() {
-        let mut gov = Governor::new(constitution());
-        gov.enter_conservation(0);
-        assert_eq!(
-            gov.authorize(&proposal(0, 5, 0.8), 3999).decision,
-            Decision::Rejected
-        );
-        assert_eq!(
-            gov.authorize(&proposal(0, 5, 0.8), 4000).decision,
-            Decision::Authorized
-        );
-        assert_eq!(gov.mode(), Mode::Normal);
     }
 }

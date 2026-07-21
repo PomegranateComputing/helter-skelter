@@ -53,9 +53,43 @@ snapshot_max_age_ticks: 2000
 # If cash drops by more than this many currency units between an
 # authorized action's snapshot and the next observation.snapshot, the
 # outcome is "wildly off prediction" and triggers an automatic rollback
-# event + conservation mode (core/governor's Mode).
+# event + conservation state (core/governor's SafetyState).
 max_unexpected_cash_drop: 1000
 
 # After an automatic rollback, no proposal is authorized for this many
-# ticks (Mode::Conservation) -- a cooling-off period, not a full stop.
+# ticks (SafetyState::Conservation) -- a cooling-off period, not a full
+# stop.
 conservation_ticks: 4000
+
+# --- Phase 8: AFK safety net (core/governor::SafetyState, the watchdog) ---
+
+# On orchestrator startup (or reconnect after a crash), the system enters
+# SafetyState::Cautious and needs this many consecutive clean (non-
+# degraded) heartbeats before it self-clears back to Normal.
+cautious_recovery_heartbeats: 2
+
+# The watchdog looks at every set_ride_price action for a ride within
+# this many ticks; if its price direction reverses more than
+# oscillation_max_reversals times in that window, the ride's policy is
+# treated as unstable and the watchdog enters SafetyState::Quarantine
+# (manual `orchestrator resolve` required).
+oscillation_window_ticks: 5000
+oscillation_max_reversals: 3
+
+# If the watchdog finds the database unreachable for longer than this,
+# it enters SafetyState::Stopped (manual `orchestrator resolve` required)
+# -- a longer, harder-line threshold than core/orchestrator/src/db.rs's
+# own DbState::Cautious degradation, which tolerates transient outages
+# indefinitely by design (see ADR-0003).
+db_unreachable_stopped_after_secs: 60
+
+# How often the watchdog polls the orchestrator's /health endpoint and
+# the database.
+watchdog_poll_interval_secs: 5
+
+# If more than this many actions are authorized in a rolling 1-minute
+# window, the watchdog treats it as runaway behavior and enters
+# SafetyState::Stopped -- deliberately far above max_actions_per_hour's
+# per-hour pace, since this is a last-resort circuit breaker, not the
+# governor's own rate limit.
+action_rate_stopped_threshold_per_minute: 20

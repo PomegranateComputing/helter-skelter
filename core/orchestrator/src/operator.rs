@@ -150,6 +150,12 @@ mod tests {
             snapshot_max_age_ticks: 2000,
             max_unexpected_cash_drop: 1000,
             conservation_ticks: 4000,
+            cautious_recovery_heartbeats: 2,
+            oscillation_window_ticks: 5000,
+            oscillation_max_reversals: 3,
+            db_unreachable_stopped_after_secs: 60,
+            watchdog_poll_interval_secs: 5,
+            action_rate_stopped_threshold_per_minute: 20,
         }
     }
 

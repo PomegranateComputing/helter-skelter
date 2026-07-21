@@ -4,7 +4,7 @@ use std::path::Path;
 
 use chrono::Utc;
 use common::protocol::{CommandAction, CommandRequest, Envelope, Payload, PROTOCOL_VERSION};
-use governor::{Constitution, Decision};
+use governor::{Constitution, Decision, SafetyState};
 use serde_json::json;
 use sqlx::PgPool;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -162,9 +162,31 @@ async fn apply(
             }
         }
         Payload::Heartbeat(heartbeat) => {
-            let mut state = shared.write().await;
-            state.health.on_heartbeat(heartbeat.tick);
-            state.world.record_tick(heartbeat.tick);
+            let current_tick = {
+                let mut state = shared.write().await;
+                state.health.on_heartbeat(heartbeat.tick);
+                state.world.record_tick(heartbeat.tick);
+                state.world.tick().unwrap_or(0)
+            };
+            // Spawned, not awaited inline: heartbeats arrive far more
+            // often than proposals, and this connection's message loop
+            // must keep reading the *next* line (a snapshot, a
+            // command.result) even if this check is slow or times out
+            // waiting on a database that's currently down -- see db.rs's
+            // ACQUIRE_TIMEOUT doc comment on the chaos test that caught
+            // this blocking the whole connection when it was awaited
+            // directly.
+            let shared = shared.clone();
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                recover_from_cautious_on_clean_heartbeat(
+                    &shared,
+                    &pool,
+                    simulation_id,
+                    current_tick,
+                )
+                .await;
+            });
         }
         Payload::ObservationSnapshot(snapshot) => {
             tracing::debug!(
@@ -207,6 +229,7 @@ async fn apply(
             check_pending_verifications(
                 shared,
                 pool,
+                simulation_id,
                 pending_verifications,
                 current_tick,
                 current_cash,
@@ -266,6 +289,7 @@ async fn apply(
                     trigger_automatic_rollback(
                         shared,
                         pool,
+                        simulation_id,
                         pending.snapshot_id,
                         format!(
                             "engine_error on action {}: {} ({})",
@@ -320,6 +344,36 @@ async fn handle_proposal(
             return;
         }
     };
+
+    // The system-wide safety state gates authorization *before* the
+    // snapshot and governor checks below -- there's no point taking a
+    // snapshot or spending rate-limit budget on a proposal that a
+    // Quarantine/Stopped/Conservation/Cautious state has already ruled
+    // out. See docs/DECISIONS.md ADR-0006.
+    let safety_state = match db::current_safety_state(pool, Some(simulation_id), current_tick).await
+    {
+        Ok(state) => state,
+        Err(err) => {
+            tracing::error!(error = %err, %proposal_id, "failed to read safety state; not authorizing/executing");
+            return;
+        }
+    };
+    if !safety_state.authorizes_proposals() {
+        let authorization = governor::Authorization {
+            decision: Decision::Rejected,
+            reason: format!(
+                "safety state is {} -- no proposal is authorized",
+                safety_state.as_str()
+            ),
+            policy_version: constitution.policy_version.clone(),
+        };
+        if let Err(err) = db::insert_authorization(pool, proposal_id, &authorization).await {
+            tracing::error!(error = %err, %proposal_id, "failed to persist authorization");
+        } else {
+            tracing::info!(reason = %authorization.reason, ride_id = proposal.ride_id, "proposal rejected");
+        }
+        return;
+    }
 
     // Ensure a snapshot recent enough to roll back to exists *before*
     // consulting the governor, not after: `Governor::authorize` has side
@@ -392,6 +446,7 @@ async fn handle_proposal(
         &command,
         &idempotency_key,
         proposal.expiry_tick,
+        current_tick,
     )
     .await
     {
@@ -459,6 +514,7 @@ async fn handle_proposal(
 async fn check_pending_verifications(
     shared: &Shared,
     pool: &PgPool,
+    simulation_id: Uuid,
     pending_verifications: &mut HashMap<Uuid, PendingVerification>,
     current_tick: u64,
     current_cash: i64,
@@ -476,6 +532,7 @@ async fn check_pending_verifications(
             trigger_automatic_rollback(
                 shared,
                 pool,
+                simulation_id,
                 pending.snapshot_id,
                 format!(
                     "cash dropped by {} after action {action_id} (limit {max_unexpected_cash_drop})",
@@ -491,31 +548,134 @@ async fn check_pending_verifications(
 /// Records a rollback event referencing `snapshot_id` (restoring its file
 /// to `runtime/current-park.park`, the park the next `openrct2-cli` start
 /// loads -- see docs/DECISIONS.md ADR-0005 on why this can't hot-swap the
-/// *running* engine's state) and enters conservation mode so no further
-/// proposal is authorized for a while. A failure to even record the
-/// rollback is logged loudly -- there is no further fallback below this.
+/// *running* engine's state), transitioning the system-wide safety state
+/// through `Rollback` and landing in `Conservation` so no further
+/// proposal is authorized for a while. Both transitions are logged even
+/// though `Rollback` is momentary -- "a rollback happened" should be
+/// queryable as a state, not just inferable from the `rollbacks` table.
+/// A failure to even record the rollback is logged loudly -- there is no
+/// further fallback below this.
 async fn trigger_automatic_rollback(
     shared: &Shared,
     pool: &PgPool,
+    simulation_id: Uuid,
     snapshot_id: Uuid,
     reason: String,
     current_tick: u64,
 ) {
+    let from_state = match db::current_safety_state(pool, Some(simulation_id), current_tick).await {
+        Ok(state) => state,
+        Err(err) => {
+            tracing::error!(error = %err, %snapshot_id, "failed to read safety state before rollback; proceeding with Normal as a conservative guess");
+            SafetyState::Normal
+        }
+    };
+    if let Err(err) = db::insert_state_transition(
+        pool,
+        Some(simulation_id),
+        from_state,
+        SafetyState::Rollback,
+        &reason,
+        "orchestrator",
+        None,
+    )
+    .await
+    {
+        tracing::error!(error = %err, %snapshot_id, "failed to record entering Rollback state");
+    }
+
     let dest = Path::new(CURRENT_PARK_PATH);
     match snapshot::restore_snapshot(pool, snapshot_id, dest, &reason, "automatic").await {
         Ok(rollback_id) => {
-            let mut state = shared.write().await;
-            state.governor.enter_conservation(current_tick);
+            let conservation_ticks = shared
+                .read()
+                .await
+                .governor
+                .constitution()
+                .conservation_ticks;
+            let until_tick = current_tick + conservation_ticks;
+            if let Err(err) = db::insert_state_transition(
+                pool,
+                Some(simulation_id),
+                SafetyState::Rollback,
+                SafetyState::Conservation,
+                "cooldown after automatic rollback",
+                "orchestrator",
+                Some(until_tick),
+            )
+            .await
+            {
+                tracing::error!(error = %err, %rollback_id, "failed to record entering Conservation state");
+            }
             tracing::warn!(
                 %rollback_id,
                 %snapshot_id,
                 reason,
-                mode = ?state.governor.mode(),
-                "automatic rollback recorded; entering conservation mode"
+                until_tick,
+                "automatic rollback recorded; entering conservation state"
             );
         }
         Err(err) => {
             tracing::error!(error = %err, %snapshot_id, reason, "failed to record automatic rollback");
+        }
+    }
+}
+
+/// Called on every heartbeat: while the safety state is `Cautious`,
+/// counts consecutive heartbeats (each one itself is evidence the
+/// connection is alive -- see `ConnectionHealth::on_heartbeat`) and
+/// transitions back to `Normal` once `cautious_recovery_heartbeats` have
+/// been observed. Outside `Cautious`, just keeps the counter at zero so
+/// a later Cautious period starts counting fresh.
+async fn recover_from_cautious_on_clean_heartbeat(
+    shared: &Shared,
+    pool: &PgPool,
+    simulation_id: Uuid,
+    current_tick: u64,
+) {
+    let safety_state = match db::current_safety_state(pool, Some(simulation_id), current_tick).await
+    {
+        Ok(state) => state,
+        Err(err) => {
+            tracing::error!(error = %err, "failed to read safety state on heartbeat");
+            return;
+        }
+    };
+
+    if safety_state != SafetyState::Cautious {
+        let mut state = shared.write().await;
+        state.clean_heartbeats_since_cautious = 0;
+        return;
+    }
+
+    let (count, needed) = {
+        let mut state = shared.write().await;
+        state.clean_heartbeats_since_cautious += 1;
+        (
+            state.clean_heartbeats_since_cautious,
+            state.governor.constitution().cautious_recovery_heartbeats,
+        )
+    };
+
+    if count >= needed {
+        match db::insert_state_transition(
+            pool,
+            Some(simulation_id),
+            SafetyState::Cautious,
+            SafetyState::Normal,
+            &format!("{count} clean heartbeats observed"),
+            "orchestrator",
+            None,
+        )
+        .await
+        {
+            Ok(_) => {
+                shared.write().await.clean_heartbeats_since_cautious = 0;
+                tracing::info!(%simulation_id, count, "recovered from cautious to normal");
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "failed to record recovery from cautious");
+            }
         }
     }
 }
