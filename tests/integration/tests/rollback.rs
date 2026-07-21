@@ -211,17 +211,27 @@ async fn engine_error_triggers_automatic_rollback_and_blocks_the_next_proposal()
         json!({ "engine_cost": null, "engine_error": { "code": "305", "message": "ride is closed" } }),
     );
     send(&mut write_half, &result_envelope).await;
-    sleep(Duration::from_millis(200)).await;
 
-    let rollbacks = sqlx::query!(
-        "SELECT r.id, r.reason, r.triggered_by, r.snapshot_id, s.simulation_id \
-         FROM rollbacks r JOIN snapshots s ON s.id = r.snapshot_id \
-         WHERE s.simulation_id = $1",
-        simulation_id
-    )
-    .fetch_all(&db_pool)
-    .await
-    .expect("query rollbacks");
+    // Persisting the rollback happens asynchronously relative to this
+    // send (process-spawn + DB round trips inside the orchestrator) --
+    // poll rather than a fixed sleep, which flaked under CI's slower/more
+    // contended runner.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let rollbacks = loop {
+        let rows = sqlx::query!(
+            "SELECT r.id, r.reason, r.triggered_by, r.snapshot_id, s.simulation_id \
+             FROM rollbacks r JOIN snapshots s ON s.id = r.snapshot_id \
+             WHERE s.simulation_id = $1",
+            simulation_id
+        )
+        .fetch_all(&db_pool)
+        .await
+        .expect("query rollbacks");
+        if !rows.is_empty() || tokio::time::Instant::now() >= deadline {
+            break rows;
+        }
+        sleep(Duration::from_millis(25)).await;
+    };
     assert_eq!(rollbacks.len(), 1, "expected exactly one rollback");
     assert_eq!(rollbacks[0].triggered_by, "automatic");
     assert!(rollbacks[0].reason.contains("engine_error"));
@@ -250,19 +260,25 @@ async fn engine_error_triggers_automatic_rollback_and_blocks_the_next_proposal()
         ),
     )
     .await;
-    sleep(Duration::from_millis(200)).await;
 
-    let ride1_authorizations = sqlx::query!(
-        r#"
-        SELECT a.decision, a.reason FROM authorizations a
-        JOIN proposals p ON p.id = a.proposal_id
-        WHERE p.simulation_id = $1 AND p.assumptions->>'ride_id' = '1'
-        "#,
-        simulation_id
-    )
-    .fetch_all(&db_pool)
-    .await
-    .expect("query ride 1 authorizations");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let ride1_authorizations = loop {
+        let rows = sqlx::query!(
+            r#"
+            SELECT a.decision, a.reason FROM authorizations a
+            JOIN proposals p ON p.id = a.proposal_id
+            WHERE p.simulation_id = $1 AND p.assumptions->>'ride_id' = '1'
+            "#,
+            simulation_id
+        )
+        .fetch_all(&db_pool)
+        .await
+        .expect("query ride 1 authorizations");
+        if !rows.is_empty() || tokio::time::Instant::now() >= deadline {
+            break rows;
+        }
+        sleep(Duration::from_millis(25)).await;
+    };
     assert_eq!(ride1_authorizations.len(), 1);
     assert_eq!(ride1_authorizations[0].decision, "rejected");
     assert!(ride1_authorizations[0].reason.contains("conservation"));
@@ -338,17 +354,23 @@ async fn wild_cash_drop_triggers_automatic_rollback() {
         ),
     )
     .await;
-    sleep(Duration::from_millis(200)).await;
 
-    let rollbacks = sqlx::query!(
-        "SELECT r.reason, r.triggered_by FROM rollbacks r \
-         JOIN snapshots s ON s.id = r.snapshot_id \
-         WHERE s.simulation_id = $1",
-        simulation_id
-    )
-    .fetch_all(&db_pool)
-    .await
-    .expect("query rollbacks");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let rollbacks = loop {
+        let rows = sqlx::query!(
+            "SELECT r.reason, r.triggered_by FROM rollbacks r \
+             JOIN snapshots s ON s.id = r.snapshot_id \
+             WHERE s.simulation_id = $1",
+            simulation_id
+        )
+        .fetch_all(&db_pool)
+        .await
+        .expect("query rollbacks");
+        if !rows.is_empty() || tokio::time::Instant::now() >= deadline {
+            break rows;
+        }
+        sleep(Duration::from_millis(25)).await;
+    };
     assert_eq!(rollbacks.len(), 1, "expected exactly one rollback");
     assert_eq!(rollbacks[0].triggered_by, "automatic");
     assert!(rollbacks[0].reason.contains("cash dropped"));
@@ -461,20 +483,26 @@ async fn snapshot_failure_does_not_consume_the_ride_cooldown() {
         ),
     )
     .await;
-    sleep(Duration::from_millis(200)).await;
 
-    let authorizations = sqlx::query!(
-        r#"
-        SELECT a.decision, a.reason FROM authorizations a
-        JOIN proposals p ON p.id = a.proposal_id
-        WHERE p.simulation_id = $1
-        ORDER BY a.created_at
-        "#,
-        simulation_id
-    )
-    .fetch_all(&db_pool)
-    .await
-    .expect("query authorizations");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let authorizations = loop {
+        let rows = sqlx::query!(
+            r#"
+            SELECT a.decision, a.reason FROM authorizations a
+            JOIN proposals p ON p.id = a.proposal_id
+            WHERE p.simulation_id = $1
+            ORDER BY a.created_at
+            "#,
+            simulation_id
+        )
+        .fetch_all(&db_pool)
+        .await
+        .expect("query authorizations");
+        if rows.len() >= 2 || tokio::time::Instant::now() >= deadline {
+            break rows;
+        }
+        sleep(Duration::from_millis(25)).await;
+    };
 
     assert_eq!(
         authorizations.len(),
