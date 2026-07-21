@@ -429,3 +429,132 @@ because `Governor::authorize` has side effects.
   the post-action 4) via a real `observation.snapshot` — the restore is
   a genuine file-level revert, verified by loading it, not just a copy
   nobody checked.
+
+---
+
+## ADR-0006: AFK safety net — Postgres-backed safety state, a separate watchdog, crash recovery, chaos tests
+
+- Status: accepted
+- Date: 2026-07-21
+
+### Context
+
+This milestone's task was the full six-state safety machine
+(`NORMAL`/`CAUTIOUS`/`CONSERVATION`/`QUARANTINE`/`ROLLBACK`/`STOPPED`)
+ADR-0003 and ADR-0005 both deferred to "a later milestone," a separate
+watchdog process monitoring the orchestrator from the outside, crash
+recovery on restart, and a chaos-test suite proving real recovery from
+real process kills and a real database outage. Phase 7's `governor::Mode`
+(`Normal`/`Conservation`, in-memory only) was the closest existing thing
+and needed to become this fuller machine, not sit alongside it as a
+second, overlapping mechanism.
+
+### Decision
+
+1. **The safety state lives in Postgres (`state_transitions`, append-only,
+   current state = the latest row), not in `Governor` as in-memory
+   state.** Phase 7's `Mode` was in-memory because only the orchestrator
+   itself ever changed it (a rollback it had just performed). This
+   milestone adds a *second* writer — the watchdog, a separate OS process
+   — and crash recovery needs to *read* the state back after a restart.
+   Both needs point the same direction: Postgres, already this project's
+   source of truth for everything else, not a second bespoke IPC or
+   shared-memory mechanism between two processes.
+2. **Only `Normal` authorizes proposals — every other state, including
+   the comparatively mild `Cautious`, blocks outright.** A state machine
+   with partial-authorization states (e.g. "Cautious still allows
+   low-risk actions") is a state machine with more edge cases to get
+   wrong, and 0.1's one action type is cheap enough that erring toward
+   "don't act while uncertain" costs little. `Governor::authorize` itself
+   no longer knows about safety state at all — `core/orchestrator/src/
+   tcp_server.rs`'s `handle_proposal` checks `current_safety_state`
+   *before* calling it, mirroring exactly how phase 7's snapshot-ensuring
+   check already worked (see ADR-0005 point 3): a blocked proposal is
+   recorded as a rejected authorization with a reason naming the state,
+   never a silent no-op, and the governor's own rate-limit/cooldown
+   bookkeeping is never touched by a state that blocks before it's ever
+   consulted.
+3. **`current_safety_state` is scoped to one simulation, falling back to
+   global (`simulation_id = NULL`) rows only when no simulation-specific
+   row exists.** The first version queried the single latest row across
+   the *entire* table, unscoped — caught immediately by the integration
+   tests: two concurrently-running tests' simulations bled into each
+   other's authorization decisions, and in production this would have
+   meant one simulation's rollback-triggered `Conservation` could
+   incorrectly block a *different* (later, or hypothetically concurrent)
+   simulation. Global rows still matter and are still consulted: crash
+   recovery's startup `Cautious` and the watchdog's `Quarantine`/`Stopped`
+   are written before (or independent of) any specific simulation, and
+   must still apply once one connects.
+4. **The watchdog only ever escalates (toward `Quarantine`/`Stopped`);
+   recovery is either automatic (`Cautious` after N clean heartbeats,
+   `Conservation` after its tick window, both owned by the orchestrator)
+   or requires a human running `orchestrator resolve`.** There is no
+   code path where the watchdog moves the state *toward* `Normal` — a
+   process whose job is "notice something's wrong" should not also be
+   the thing that decides "it's fine now," especially for the states
+   (`Quarantine`, `Stopped`) explicitly designed to need a human look.
+5. **The watchdog is a genuinely separate binary
+   (`core/orchestrator/src/bin/watchdog.rs`) with no dependency on the
+   orchestrator's in-process state** — it reasons only about the
+   database directly and the `/health` HTTP endpoint (a raw TCP GET, the
+   same minimal approach `tests/integration/tests/orchestrator.rs`'s
+   `get_health` already used, rather than pulling in a new HTTP client
+   dependency). This is deliberate: a watchdog that shared memory or a
+   process with the thing it watches couldn't detect that thing being
+   fully wedged or dead.
+6. **Oscillation and action-rate checks are scoped to the most recently
+   started simulation (`db::latest_simulation_id`), and `actions` gained
+   a `tick` column** it didn't have before (`expiry_tick` is a deadline,
+   not the tick an action was actually authorized at) — needed to window
+   "how many times did this ride's price reverse direction in the last N
+   ticks" at all. Both queries join through to `proposals.simulation_id`
+   rather than operating on the whole `actions` table unscoped, for the
+   same cross-simulation-leak reason as point 3.
+7. **Crash recovery (`core/orchestrator/src/startup.rs::
+   reconcile_on_startup`) unconditionally enters `Cautious` on every
+   restart and logs (but does not attempt to resume) any actions with no
+   recorded result.** There's no "was this a clean shutdown" check to get
+   wrong — a fresh start is inherently unconfirmed territory whether or
+   not it follows a crash, and `idempotency_key` already makes resuming
+   an orphaned action unnecessary (replaying it is a no-op, not a
+   duplicate execution) even though nothing attempts to.
+8. **A real chaos test caught a real bug, fixed here, not worked
+   around:** `stop-postgres-60s.sh` showed the orchestrator's `/health`
+   staying up during a 60-second database outage, but `db_state` never
+   reported `cautious` — the connection's message loop had gone
+   completely silent instead. Cause: the new per-heartbeat safety-state
+   check (`recover_from_cautious_on_clean_heartbeat`) was awaited inline,
+   and sqlx's default 30-second pool-acquire timeout meant *every*
+   heartbeat blocked the entire connection's read loop for up to 30s
+   while Postgres was unreachable — the exact "DB outage degrades, never
+   blocks" guarantee ADR-0003 established for the buffered `Persistence`
+   worker, quietly broken for this new synchronous check. Fixed two ways:
+   `db::connect` now sets an explicit 3-second `acquire_timeout` (was
+   unset, so sqlx's 30s default applied), and the heartbeat check is
+   `tokio::spawn`ed rather than awaited inline, so a slow or failing
+   query never blocks the next incoming message on that connection.
+
+### Consequences
+
+- Any future code that gates behavior on safety state must query
+  `current_safety_state` (or read the ledger directly) — there is no
+  in-memory shortcut anymore, by design; see point 1.
+- Any new *synchronous* (non-buffered) database call added to a
+  frequently-hit path (anything per-heartbeat or per-message, not just
+  per-proposal) must be evaluated against the same question point 8
+  answers: does this block the connection's message loop long enough to
+  matter during an outage, and should it be spawned instead of awaited.
+- `scripts/dev/chaos/` is now a real, repeatable regression suite for
+  exactly the failure modes it exercises (bridge crash, orchestrator
+  crash mid-action, database outage) — worth re-running after any change
+  that touches connection handling, the persistence worker, or the
+  safety-state gate, the same way the integration test suite gets re-run
+  after changes to the decision pipeline.
+- `Quarantine` and `Stopped` have no automated test coverage for the
+  watchdog actually *triggering* them against a live process (only their
+  constituent DB queries and the manual `orchestrator resolve` path are
+  tested) — forcing real oscillation or a real runaway action rate
+  end-to-end was judged lower value than the three chaos scenarios the
+  task named explicitly, given time spent. A future milestone that
+  depends heavily on the watchdog's escalation behavior should add this.

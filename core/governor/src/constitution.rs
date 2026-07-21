@@ -29,6 +29,12 @@ pub struct Constitution {
     pub snapshot_max_age_ticks: u64,
     pub max_unexpected_cash_drop: i64,
     pub conservation_ticks: u64,
+    pub cautious_recovery_heartbeats: u32,
+    pub oscillation_window_ticks: u64,
+    pub oscillation_max_reversals: u32,
+    pub db_unreachable_stopped_after_secs: u64,
+    pub watchdog_poll_interval_secs: u64,
+    pub action_rate_stopped_threshold_per_minute: u32,
 }
 
 impl Constitution {

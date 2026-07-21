@@ -112,6 +112,13 @@ pub struct SharedState {
     pub world: WorldModel,
     pub db_state: DbState,
     pub governor: Governor,
+    /// Consecutive clean heartbeats observed while the system-wide safety
+    /// state (core/governor::SafetyState, persisted in Postgres -- see
+    /// db.rs's `current_safety_state`) is `Cautious`. Deliberately *not*
+    /// persisted: it's a fact about what this process instance has
+    /// personally observed on its current connection, not a historical
+    /// record: see docs/DECISIONS.md ADR-0006.
+    pub clean_heartbeats_since_cautious: u32,
 }
 
 pub type Shared = Arc<RwLock<SharedState>>;
@@ -126,6 +133,7 @@ pub fn new_shared(constitution: Constitution) -> Shared {
         world: WorldModel::new(),
         db_state: DbState::default(),
         governor: Governor::new(constitution),
+        clean_heartbeats_since_cautious: 0,
     }))
 }
 

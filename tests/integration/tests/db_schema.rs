@@ -106,14 +106,15 @@ async fn full_ledger_chain_round_trips() {
     let idempotency_key = format!("test-{}", Uuid::now_v7());
     let action_id: Uuid = sqlx::query_scalar!(
         r#"
-        INSERT INTO actions (authorization_id, command, idempotency_key, expiry_tick)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO actions (authorization_id, command, idempotency_key, expiry_tick, tick)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING id
         "#,
         authorization_id,
         json!({ "action": "set_ride_price", "params": { "ride_id": 0, "price": 4 } }),
         idempotency_key,
         1000_i64,
+        0_i64,
     )
     .fetch_one(&pool)
     .await
@@ -233,13 +234,14 @@ async fn duplicate_idempotency_key_conflicts() {
     let idempotency_key = format!("dup-{}", Uuid::now_v7());
     sqlx::query!(
         r#"
-        INSERT INTO actions (authorization_id, command, idempotency_key, expiry_tick)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO actions (authorization_id, command, idempotency_key, expiry_tick, tick)
+        VALUES ($1, $2, $3, $4, $5)
         "#,
         authorization_id,
         json!({}),
         idempotency_key,
         1000_i64,
+        0_i64,
     )
     .execute(&pool)
     .await
@@ -247,13 +249,14 @@ async fn duplicate_idempotency_key_conflicts() {
 
     let second_insert = sqlx::query!(
         r#"
-        INSERT INTO actions (authorization_id, command, idempotency_key, expiry_tick)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO actions (authorization_id, command, idempotency_key, expiry_tick, tick)
+        VALUES ($1, $2, $3, $4, $5)
         "#,
         authorization_id,
         json!({}),
         idempotency_key,
         1000_i64,
+        0_i64,
     )
     .execute(&pool)
     .await;

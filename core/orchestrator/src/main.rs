@@ -2,16 +2,12 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use governor::Constitution;
+use governor::{Constitution, SafetyState};
 use orchestrator::snapshot::{self, SnapshotConfig, CURRENT_PARK_PATH};
-use orchestrator::{config, db, new_shared, OrchestratorError, Persistence};
+use orchestrator::{
+    config, db, new_shared, reconcile_on_startup, OrchestratorError, Persistence, HEALTH_PORT,
+};
 use uuid::Uuid;
-
-/// Health endpoint port. Not read from config/bridge.json (that file is
-/// the bridge<->orchestrator port both sides must agree on); this is
-/// orchestrator-only and has no other consumer yet, so a constant is
-/// enough for 0.1.
-const HEALTH_PORT: u16 = 8091;
 
 #[derive(Parser)]
 struct Cli {
@@ -30,6 +26,14 @@ enum Command {
         #[arg(long = "to")]
         to: Uuid,
         #[arg(long, default_value = "manual rollback via CLI")]
+        reason: String,
+    },
+    /// Manually clears Quarantine or Stopped back to Normal -- the only
+    /// way out of either, by design (see docs/DECISIONS.md ADR-0006):
+    /// both require a human to have actually looked at why the watchdog
+    /// tripped before the system resumes acting.
+    Resolve {
+        #[arg(long, default_value = "manually resolved via CLI")]
         reason: String,
     },
 }
@@ -63,11 +67,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("stop the running stack (if any) and restart it to load the restored park");
             Ok(())
         }
+        Some(Command::Resolve { reason }) => {
+            let from_state = db::current_safety_state(&pool, None, 0).await?;
+            if !from_state.requires_manual_resolution() {
+                println!(
+                    "safety state is already {} -- nothing to resolve",
+                    from_state.as_str()
+                );
+                return Ok(());
+            }
+            db::insert_state_transition(
+                &pool,
+                None,
+                from_state,
+                SafetyState::Normal,
+                &reason,
+                "manual",
+                None,
+            )
+            .await?;
+            println!("safety state resolved: {} -> normal", from_state.as_str());
+            Ok(())
+        }
         None => run_server(pool).await,
     }
 }
 
 async fn run_server(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    reconcile_on_startup(&pool).await?;
+
     let bridge_config = config::load(Path::new("config/bridge.json"))?;
     let tcp_addr: SocketAddr = format!("{}:{}", bridge_config.host, bridge_config.port).parse()?;
     let health_addr: SocketAddr = format!("{}:{}", bridge_config.host, HEALTH_PORT).parse()?;
