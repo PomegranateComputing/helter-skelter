@@ -15,8 +15,21 @@ use orchestrator::{db, new_shared, Persistence, SnapshotConfig};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 use uuid::Uuid;
+
+/// Serializes port allocation across this file's tests: each spawns an
+/// orchestrator by probing an ephemeral port, dropping the probe listener,
+/// then handing the bare port number to a task that binds it for real --
+/// there's an inherent gap between "we know the port" and "it's actually
+/// bound again," and with 3 tests in this file doing that concurrently,
+/// CI (evidently faster/more prone to reusing a just-freed port than
+/// local dev) hit the collision for real: `AddrInUse`. Holding this lock
+/// across the whole probe+spawn+settle sequence in `spawn_orchestrator_with`
+/// means no other test in this file starts probing until the previous
+/// one's real bind has already succeeded.
+static PORT_LOCK: Mutex<()> = Mutex::const_new(());
 
 fn constitution_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/constitution-0.1.yaml")
@@ -46,6 +59,8 @@ async fn spawn_orchestrator() -> (SocketAddr, sqlx::PgPool) {
 }
 
 async fn spawn_orchestrator_with(snapshot_config: SnapshotConfig) -> (SocketAddr, sqlx::PgPool) {
+    let _port_guard = PORT_LOCK.lock().await;
+
     let tcp_probe = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind tcp probe");
