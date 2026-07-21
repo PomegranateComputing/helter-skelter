@@ -3,11 +3,13 @@ pub mod db;
 pub mod error;
 pub mod health;
 pub mod operator;
+pub mod snapshot;
 pub mod state;
 pub mod tcp_server;
 
 pub use db::Persistence;
 pub use error::OrchestratorError;
+pub use snapshot::SnapshotConfig;
 pub use state::{new_shared, ConnectionState, DbState, Shared};
 
 use std::net::SocketAddr;
@@ -23,9 +25,10 @@ pub async fn run(
     pool: PgPool,
     tcp_addr: SocketAddr,
     health_addr: SocketAddr,
+    snapshot_config: SnapshotConfig,
 ) -> Result<(), OrchestratorError> {
     tokio::try_join!(
-        tcp_server::run(shared.clone(), persistence, pool, tcp_addr),
+        tcp_server::run(shared.clone(), persistence, pool, tcp_addr, snapshot_config),
         health::run(shared, health_addr),
     )?;
     Ok(())

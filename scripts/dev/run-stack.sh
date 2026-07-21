@@ -7,6 +7,11 @@ set -euo pipefail
 #
 # Run until killed (Ctrl-C). Check liveness separately with:
 #   curl -s http://127.0.0.1:8091/health | jq
+#
+# To roll back to a snapshot: stop this script, run
+#   DATABASE_URL=... target/debug/orchestrator rollback --to <snapshot_id>
+# then re-run this script -- it loads runtime/current-park.park (which
+# the rollback just restored) instead of the default dev park if present.
 
 OPENRCT2_VERSION="v0.5.3"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -16,7 +21,8 @@ ORCH_LOG="${LOG_DIR}/orchestrator-${TIMESTAMP}.log"
 GAME_LOG="${LOG_DIR}/openrct2-headless-${TIMESTAMP}.log"
 
 OPENRCT2_BIN="${REPO_ROOT}/runtime/openrct2/${OPENRCT2_VERSION}/OpenRCT2/openrct2-cli"
-PARK="${REPO_ROOT}/assets/scenarios/dev/dev-park.park"
+PARK_DEFAULT="${REPO_ROOT}/assets/scenarios/dev/dev-park.park"
+PARK_CURRENT="${REPO_ROOT}/runtime/current-park.park"
 PLUGIN_DIR="${HOME}/.config/OpenRCT2/plugin"
 export DATABASE_URL="${DATABASE_URL:-postgres://helterskelter:helterskelter@localhost:5433/helterskelter}"
 
@@ -24,6 +30,16 @@ log() { printf '[run-stack] %s\n' "$*"; }
 fail() { printf '[run-stack] ERROR: %s\n' "$*" >&2; exit 1; }
 
 [ -x "${OPENRCT2_BIN}" ] || fail "OpenRCT2 not installed. Run scripts/bootstrap/setup-openrct2.sh first."
+
+# `orchestrator rollback --to <id>` restores a snapshot to PARK_CURRENT --
+# prefer it when present so a rollback actually takes effect on the next
+# start, per docs/DECISIONS.md ADR-0005.
+if [ -f "${PARK_CURRENT}" ]; then
+    PARK="${PARK_CURRENT}"
+    log "Using restored park: ${PARK} (runtime/current-park.park exists -- remove it to fall back to the default dev park)"
+else
+    PARK="${PARK_DEFAULT}"
+fi
 [ -f "${PARK}" ] || fail "Dev park not found at ${PARK} (see assets/scenarios/dev/README.md)."
 
 log "Bringing up PostgreSQL and applying migrations..."

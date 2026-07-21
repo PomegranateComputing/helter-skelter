@@ -139,18 +139,19 @@ async fn full_ledger_chain_round_trips() {
     assert_eq!(result_row.engine_cost, Some(0));
     assert!(result_row.engine_error.is_none());
 
-    sqlx::query!(
-        "INSERT INTO snapshots (simulation_id, kind, storage_path) VALUES ($1, $2, $3)",
+    let snapshot_id = sqlx::query_scalar!(
+        "INSERT INTO snapshots (simulation_id, kind, storage_path, tick) VALUES ($1, $2, $3, $4) RETURNING id",
         simulation_id,
         "manual",
         "runtime/checkpoints/test.park",
+        123_i64,
     )
-    .execute(&pool)
+    .fetch_one(&pool)
     .await
     .expect("insert snapshot");
 
     let snapshot_row = sqlx::query!(
-        "SELECT kind, storage_path FROM snapshots WHERE simulation_id = $1",
+        "SELECT kind, storage_path, tick FROM snapshots WHERE simulation_id = $1",
         simulation_id
     )
     .fetch_one(&pool)
@@ -158,6 +159,28 @@ async fn full_ledger_chain_round_trips() {
     .expect("select snapshot");
     assert_eq!(snapshot_row.kind, "manual");
     assert_eq!(snapshot_row.storage_path, "runtime/checkpoints/test.park");
+    assert_eq!(snapshot_row.tick, 123);
+
+    sqlx::query!(
+        "INSERT INTO rollbacks (simulation_id, snapshot_id, reason, triggered_by) VALUES ($1, $2, $3, $4)",
+        simulation_id,
+        snapshot_id,
+        "test rollback",
+        "manual",
+    )
+    .execute(&pool)
+    .await
+    .expect("insert rollback");
+
+    let rollback_row = sqlx::query!(
+        "SELECT reason, triggered_by FROM rollbacks WHERE snapshot_id = $1",
+        snapshot_id
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("select rollback");
+    assert_eq!(rollback_row.reason, "test rollback");
+    assert_eq!(rollback_row.triggered_by, "manual");
 }
 
 #[tokio::test]
@@ -293,5 +316,37 @@ async fn append_only_tables_reject_update_and_delete() {
     assert!(
         delete_result.is_err(),
         "DELETE on an append-only table must be rejected"
+    );
+
+    let snapshot_id = sqlx::query_scalar!(
+        "INSERT INTO snapshots (simulation_id, kind, storage_path, tick) VALUES ($1, $2, $3, $4) RETURNING id",
+        simulation_id,
+        "manual",
+        "runtime/checkpoints/append-only-test.park",
+        0_i64,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("insert snapshot");
+    sqlx::query!(
+        "INSERT INTO rollbacks (simulation_id, snapshot_id, reason, triggered_by) VALUES ($1, $2, $3, $4)",
+        simulation_id,
+        snapshot_id,
+        "test",
+        "manual",
+    )
+    .execute(&pool)
+    .await
+    .expect("insert rollback");
+
+    let rollback_update = sqlx::query!(
+        "UPDATE rollbacks SET reason = 'edited' WHERE snapshot_id = $1",
+        snapshot_id
+    )
+    .execute(&pool)
+    .await;
+    assert!(
+        rollback_update.is_err(),
+        "UPDATE on rollbacks (append-only) must be rejected"
     );
 }

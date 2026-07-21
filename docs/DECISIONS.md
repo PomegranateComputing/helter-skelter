@@ -313,3 +313,119 @@ each needed a call.
   tests, which construct synthetic high-queue snapshots directly — not by
   a live OpenRCT2 run. This gap closes only once a real queue-length
   source exists in the engine or bridge.
+
+---
+
+## ADR-0005: Park snapshots and rollback — autosave-copying, snapshot-before-authorize, file-level restore only
+
+- Status: accepted
+- Date: 2026-07-21
+
+### Context
+
+This milestone's task was to add snapshot-before-action and a rollback
+path: take a snapshot before authorizing an action, roll back to one
+(manually via a CLI subcommand, or automatically on a failed
+verification), and land in a conservation mode afterward that blocks
+further proposals for a while. The task itself anticipated the hardest
+open question up front ("check docs/OPENRCT2_INTEGRATION.md first: if
+the scripting API cannot save, implement it host-side and record the
+gap") — that GAP, documented back in phase 3 and already anticipated in
+ADR-0003's `snapshots` table comment, turned out to be exactly as
+blocking as expected, and shaped nearly every decision below. A second,
+unanticipated question surfaced only during the real end-to-end proof
+run: the order of snapshot-taking versus governor authorization matters
+because `Governor::authorize` has side effects.
+
+### Decision
+
+1. **No on-demand save exists anywhere in v0.5.3 — confirmed exhaustively
+   in `docs/OPENRCT2_INTEGRATION.md`, and re-confirmed by fetching
+   `Scenario.cpp`'s `ScenarioAutosaveCheck` from the pinned `v0.5.3` tag
+   directly: the finest built-in autosave granularity is
+   `AUTOSAVE_EVERY_MINUTE`, driven by real wall-clock time
+   (`Platform::GetTicks()`), not game ticks, and not triggerable early.**
+   `scripts/dev/snapshot.sh` (host-side, per the task's own escape hatch)
+   does not trigger a save — it copies whichever autosave file
+   `~/.config/OpenRCT2/save/autosave/` most recently received. This means
+   a "snapshot" can be up to a minute of real time stale relative to the
+   tick label `core/orchestrator/src/snapshot.rs` records against it, and
+   the very first action in a fresh simulation can fail to snapshot at
+   all if the engine hasn't autosaved yet (handled as a rejected
+   authorization, not a crash — see point 3). `config.ini`'s `autosave`
+   must be set to `0` (every minute) on any machine that wants this to be
+   usably fresh; that's a local, machine-specific setting, not something
+   the repo can commit (same category as installing the bridge plugin to
+   `~/.config/OpenRCT2/plugin/`).
+2. **An automatic rollback restores its snapshot's file to
+   `runtime/current-park.park` — a fixed path `scripts/dev/run-stack.sh`
+   prefers over the default dev park — but never touches the *running*
+   engine's in-memory state.** There is no plugin API to hot-swap a live
+   instance's world state (the same GAP that blocks on-demand saves), so
+   "ROLLBACK state" in this milestone means: record the rollback event,
+   restore the file that the *next* `openrct2-cli` start will load, and
+   enter conservation mode so no further action is authorized against the
+   still-running, still-diverged instance. Actually reverting the live
+   game requires a human (or, later, a supervisor) to stop and restart
+   the stack — `core/orchestrator/src/snapshot.rs::restore_snapshot` is
+   shared by both the manual CLI path and the automatic trigger for
+   exactly this reason: there's no meaningful difference in what either
+   can *do* to the file, only in what triggered it and why.
+3. **`ensure_recent_snapshot` runs before `Governor::authorize`, not
+   after.** The first design authorized first and snapshotted second (an
+   arguably more natural reading of "before any authorized action, ensure
+   a snapshot exists"), and it was wrong: `authorize` commits per-ride
+   cooldown and rate-limit bookkeeping the moment it returns `Authorized`,
+   so a snapshot failure discovered *after* that call had already silently
+   burned the ride's cooldown for an action that never actually executed
+   — a real bug caught during this milestone's own end-to-end proof run,
+   not by any unit test (regression test:
+   `tests/integration/tests/rollback.rs`'s
+   `snapshot_failure_does_not_consume_the_ride_cooldown`). Reordering so
+   the snapshot is ensured first means a snapshot failure is recorded as
+   a rejected authorization (reason: "no recent snapshot available") that
+   never touched the governor's state at all, and the next attempt gets a
+   fair, unpenalized shot.
+4. **"Wildly off prediction" is operationalized as a single generic
+   check — cash dropped more than `constitution.max_unexpected_cash_drop`
+   between an action's pre-execution snapshot and the next
+   observation.snapshot — not a bespoke numeric forecast per proposal.**
+   None of 0.1's proposals (`core/orchestrator/src/operator.rs`) carry a
+   structured numeric cash prediction, only descriptive `predicted_effect`
+   JSON; inventing one solely to diff against would manufacture a
+   precision the rule doesn't actually have. The check is one-shot (the
+   next snapshot after an action's result, checked exactly once) and
+   generic across action types, so it doesn't need to change when 0.2+
+   adds new bounded commands.
+5. **Conservation mode is a single `governor::Mode` enum
+   (`Normal`/`Conservation { until_tick }`), not the full
+   `NORMAL`/`CAUTIOUS`/`CONSERVATION`/`QUARANTINE`/`ROLLBACK`/`STOPPED`
+   state machine ADR-0003 deferred.** `Governor::authorize` checks it
+   first and rejects with a clear reason if active, which also means a
+   proposal made *during* conservation is still fully recorded (proposal
+   + rejected authorization), not silently dropped — consistent with this
+   project's "every rejection has a reason" rule rather than a special
+   case.
+
+### Consequences
+
+- Any 0.2+ code that authorizes actions must call `ensure_recent_snapshot`
+  before `Governor::authorize`, following the same order — reversing it
+  reintroduces the exact bug point 3 describes.
+- `runtime/current-park.park` is now a meaningful convention
+  `scripts/dev/run-stack.sh` and any future watchdog/supervisor (0.1's
+  phase 8) need to respect; a supervisor that restarts the stack after a
+  crash should treat its presence as "there's a pending rollback to load,"
+  not incidental state.
+- The autosave-copying approach means snapshot freshness and
+  availability are both bounded by the engine's autosave cadence, not by
+  this milestone's own logic — a fork of the engine to add a real
+  on-demand save (explicitly sanctioned by `docs/VISION.md`) is the only
+  way to remove this ceiling, and remains future work, not attempted
+  here.
+- The real end-to-end proof (executed action → manual rollback → fresh
+  `openrct2-cli` load of `runtime/current-park.park`) confirmed the
+  restored park's ride prices read back at their pre-action value (5, not
+  the post-action 4) via a real `observation.snapshot` — the restore is
+  a genuine file-level revert, verified by loading it, not just a copy
+  nobody checked.

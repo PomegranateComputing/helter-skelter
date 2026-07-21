@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use chrono::Utc;
-use orchestrator::{db, new_shared, Persistence};
+use orchestrator::{db, new_shared, Persistence, SnapshotConfig};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -18,6 +18,17 @@ use uuid::Uuid;
 
 fn constitution_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/constitution-0.1.yaml")
+}
+
+/// No real OpenRCT2 process runs in these tests, so there's no real
+/// autosave for scripts/dev/snapshot.sh to copy -- fake-snapshot.sh
+/// stands in, writing an empty placeholder instead (see its doc comment).
+fn test_snapshot_config() -> SnapshotConfig {
+    SnapshotConfig {
+        script_path: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/fake-snapshot.sh"),
+        checkpoint_root: std::env::temp_dir().join("helter-skelter-test-checkpoints"),
+    }
 }
 
 async fn pool() -> sqlx::PgPool {
@@ -49,9 +60,16 @@ async fn spawn_orchestrator() -> (SocketAddr, SocketAddr, sqlx::PgPool) {
 
     let run_pool = pool.clone();
     tokio::spawn(async move {
-        orchestrator::run(shared, persistence, run_pool, tcp_addr, health_addr)
-            .await
-            .expect("orchestrator run");
+        orchestrator::run(
+            shared,
+            persistence,
+            run_pool,
+            tcp_addr,
+            health_addr,
+            test_snapshot_config(),
+        )
+        .await
+        .expect("orchestrator run");
     });
 
     sleep(Duration::from_millis(50)).await;

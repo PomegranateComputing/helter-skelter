@@ -40,3 +40,22 @@ queue_length_low_threshold: 0
 consecutive_snapshots_required: 2
 
 price_step: 1
+
+# --- Phase 7: park snapshots and rollback ---
+
+# Before authorizing any action, the orchestrator ensures a snapshot no
+# older than this many ticks exists for the simulation (see
+# core/orchestrator/src/snapshot.rs); otherwise it takes one first. See
+# docs/DECISIONS.md ADR-0005 for why this is an autosave copy, not an
+# on-demand save.
+snapshot_max_age_ticks: 2000
+
+# If cash drops by more than this many currency units between an
+# authorized action's snapshot and the next observation.snapshot, the
+# outcome is "wildly off prediction" and triggers an automatic rollback
+# event + conservation mode (core/governor's Mode).
+max_unexpected_cash_drop: 1000
+
+# After an automatic rollback, no proposal is authorized for this many
+# ticks (Mode::Conservation) -- a cooling-off period, not a full stop.
+conservation_ticks: 4000

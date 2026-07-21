@@ -147,6 +147,9 @@ mod tests {
             queue_length_low_threshold: 0,
             consecutive_snapshots_required: 2,
             price_step: 1,
+            snapshot_max_age_ticks: 2000,
+            max_unexpected_cash_drop: 1000,
+            conservation_ticks: 4000,
         }
     }
 
