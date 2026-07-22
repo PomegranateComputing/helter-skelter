@@ -13,6 +13,10 @@ every decision it makes.
 See [docs/VISION.md](docs/VISION.md) for the full thesis and
 [docs/ROADMAP.md](docs/ROADMAP.md) for the path from 0.1 to 1.0.
 
+**Status: milestone 0.1 ("The Autonomous Operator") is complete**, tagged
+[`v0.1.0`](../../releases/tag/v0.1.0). See docs/DECISIONS.md's ADR-0007 for
+the acceptance-run retrospective and 0.2 ("The Architect") is next.
+
 ## Architecture (0.1 scope)
 
 Milestone 0.1 — "The Autonomous Operator" — touches only the slice needed to
@@ -45,7 +49,7 @@ Every other top-level directory (`core/coaster-foundry`, `core/visitor-engine`,
 milestones 0.2 and later — see the scope rule in
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
-## 0.1 goals
+## 0.1 goals (all met — see ADR-0007)
 
 - Launch and observe OpenRCT2 in an automation-friendly mode.
 - Export a complete park-state representation over the bridge.
@@ -56,6 +60,9 @@ milestones 0.2 and later — see the scope rule in
   → authorization → execution → result) in PostgreSQL.
 - Run for hours unattended, and recover cleanly from a bridge or
   orchestrator crash.
+- An explicit safety-state machine (Normal/Cautious/Conservation/
+  Quarantine/Rollback/Stopped) with a separate watchdog process, snapshot
+  + rollback, and crash recovery.
 
 No language model sits in the 0.1 decision loop. Every action taken in this
 milestone is deterministic and policy-driven — see
@@ -86,3 +93,36 @@ cd bridge/openrct2-plugin && pnpm install && pnpm build
 # Run the orchestrator (starts the observe -> propose -> authorize -> act loop)
 cd - && DATABASE_URL=postgres://helterskelter:helterskelter@localhost:5433/helterskelter cargo run -p orchestrator
 ```
+
+Or, to bring up the whole real stack (orchestrator + headless OpenRCT2 +
+bridge plugin) in one step: `scripts/dev/run-stack.sh`.
+
+### Operator CLI
+
+`orchestrator` (no subcommand) runs the observe → propose → authorize →
+act loop. Subcommands for operator intervention:
+
+```bash
+# Roll back to a snapshot (restores runtime/current-park.park; restart
+# the stack afterward to load it):
+orchestrator rollback --to <snapshot_id> [--reason "..."]
+
+# Manually clear Quarantine/Stopped back to Normal (the only way out of
+# either -- see docs/DECISIONS.md ADR-0006):
+orchestrator resolve [--reason "..."]
+
+# Generate a Markdown operator report for one simulation into exports/:
+orchestrator report --simulation <simulation_id>
+```
+
+A separate watchdog binary (`cargo run -p orchestrator --bin watchdog`)
+monitors the orchestrator's `/health` endpoint, the database, action rate,
+and per-ride price oscillation from outside the orchestrator process —
+see ADR-0006.
+
+### Chaos and acceptance testing
+
+`scripts/dev/chaos/` holds repeatable chaos tests (kill the bridge
+mid-run, kill the orchestrator with an action in flight, a 60s database
+outage). `scripts/dev/acceptance-0.1.sh [duration-seconds]` runs the full
+0.1 acceptance criteria against the real stack — see ADR-0007.

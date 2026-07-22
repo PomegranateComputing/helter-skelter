@@ -1,6 +1,6 @@
 # Roadmap
 
-## 0.1 — The Autonomous Operator (current)
+## 0.1 — The Autonomous Operator (complete, tagged v0.1.0)
 
 - Launch and observe OpenRCT2 in an automation-friendly mode.
 - Export a complete park-state representation over the bridge.
@@ -9,10 +9,15 @@
 - Maintain an immutable decision ledger in PostgreSQL.
 - Run for hours without intervention; recover cleanly from a bridge or
   orchestrator crash.
+- An explicit safety-state machine, a separate watchdog process, park
+  snapshots and rollback, and crash recovery.
 
 No language model sits in the 0.1 decision loop — every action is
 deterministic and policy-driven. See [VISION.md](VISION.md) for the
-constitutional priorities that gate every proposal.
+constitutional priorities that gate every proposal, and
+[DECISIONS.md](DECISIONS.md)'s ADR-0007 for the closing acceptance-run
+retrospective (prediction quality, confirmed API gaps, and what 0.2
+inherits).
 
 ### Scope rule for 0.1
 
@@ -31,7 +36,7 @@ Every other top-level directory is a placeholder for 0.2 and later —
 `experiments/`. These directories hold a `.gitkeep` and no code until their
 milestone arrives. See [CLAUDE.md](../CLAUDE.md) for the enforcement rule.
 
-## 0.2 — The Architect
+## 0.2 — The Architect (current)
 
 - Terrain graph and buildable-space representation.
 - Zoning: entrance axis, anchors, lands, quiet zones, service corridors,

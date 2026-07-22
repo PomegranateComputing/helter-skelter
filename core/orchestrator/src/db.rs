@@ -578,3 +578,173 @@ pub async fn recent_price_changes(
     .fetch_all(pool)
     .await
 }
+
+// --- Report queries --------------------------------------------------------
+//
+// Every query here is read-only and scoped to one simulation (falling back
+// to global rows only for state_transitions, matching current_safety_state's
+// own scoping) -- see `crate::report`.
+
+pub struct SimulationInfo {
+    pub id: Uuid,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub bridge_version: String,
+    pub openrct2_version: String,
+}
+
+pub async fn find_simulation(
+    pool: &PgPool,
+    simulation_id: Uuid,
+) -> Result<Option<SimulationInfo>, sqlx::Error> {
+    sqlx::query_as!(
+        SimulationInfo,
+        r#"SELECT id, started_at, ended_at, bridge_version, openrct2_version
+           FROM simulations WHERE id = $1"#,
+        simulation_id,
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+pub struct StateTransitionRow {
+    pub from_state: String,
+    pub to_state: String,
+    pub reason: String,
+    pub triggered_by: String,
+    pub created_at: DateTime<Utc>,
+}
+
+pub async fn state_transitions_for_report(
+    pool: &PgPool,
+    simulation_id: Uuid,
+) -> Result<Vec<StateTransitionRow>, sqlx::Error> {
+    sqlx::query_as!(
+        StateTransitionRow,
+        r#"
+        SELECT from_state, to_state, reason, triggered_by, created_at
+        FROM state_transitions
+        WHERE simulation_id = $1 OR simulation_id IS NULL
+        ORDER BY created_at ASC
+        "#,
+        simulation_id,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub struct LedgerRow {
+    pub proposal_id: Uuid,
+    pub agent: String,
+    pub predicted_effect: Value,
+    pub confidence: f32,
+    pub proposal_created_at: DateTime<Utc>,
+    pub decision: Option<String>,
+    pub auth_reason: Option<String>,
+    pub action_id: Option<Uuid>,
+    pub command: Option<Value>,
+    pub engine_cost: Option<i64>,
+    pub engine_error: Option<Value>,
+}
+
+/// The full proposal -> authorization -> action -> result chain for one
+/// simulation, correlated end to end -- a rejected proposal has `decision`
+/// but no `action_id`; an authorized one not yet resolved has `action_id`
+/// but no `engine_cost`/`engine_error`.
+pub async fn ledger_for_report(
+    pool: &PgPool,
+    simulation_id: Uuid,
+) -> Result<Vec<LedgerRow>, sqlx::Error> {
+    sqlx::query_as!(
+        LedgerRow,
+        r#"
+        SELECT
+            p.id AS proposal_id,
+            p.agent,
+            p.predicted_effect,
+            p.confidence,
+            p.created_at AS proposal_created_at,
+            a.decision,
+            a.reason AS auth_reason,
+            ac.id AS "action_id?",
+            ac.command AS "command?",
+            ar.engine_cost AS "engine_cost?",
+            ar.engine_error AS "engine_error?"
+        FROM proposals p
+        LEFT JOIN authorizations a ON a.proposal_id = p.id
+        LEFT JOIN actions ac ON ac.authorization_id = a.id
+        LEFT JOIN action_results ar ON ar.action_id = ac.id
+        WHERE p.simulation_id = $1
+        ORDER BY p.created_at ASC
+        "#,
+        simulation_id,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub struct RollbackRow {
+    pub snapshot_id: Uuid,
+    pub reason: String,
+    pub triggered_by: String,
+    pub created_at: DateTime<Utc>,
+}
+
+pub async fn rollbacks_for_report(
+    pool: &PgPool,
+    simulation_id: Uuid,
+) -> Result<Vec<RollbackRow>, sqlx::Error> {
+    sqlx::query_as!(
+        RollbackRow,
+        r#"SELECT snapshot_id, reason, triggered_by, created_at
+           FROM rollbacks WHERE simulation_id = $1 ORDER BY created_at ASC"#,
+        simulation_id,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub struct FinalKpis {
+    pub cash: i64,
+    pub guest_count: i32,
+    pub park_rating: i32,
+    pub recorded_at: DateTime<Utc>,
+}
+
+pub async fn final_kpis(
+    pool: &PgPool,
+    simulation_id: Uuid,
+) -> Result<Option<FinalKpis>, sqlx::Error> {
+    sqlx::query_as!(
+        FinalKpis,
+        r#"SELECT cash, guest_count, park_rating, recorded_at
+           FROM observations WHERE simulation_id = $1
+           ORDER BY recorded_at DESC LIMIT 1"#,
+        simulation_id,
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// Actions with no recorded result, scoped to one simulation -- an
+/// "unexplained anomaly" in the report if any exist once the simulation
+/// has ended (during a live run, one being briefly in flight is normal).
+pub async fn in_flight_actions_for_simulation(
+    pool: &PgPool,
+    simulation_id: Uuid,
+) -> Result<Vec<InFlightAction>, sqlx::Error> {
+    sqlx::query_as!(
+        InFlightAction,
+        r#"
+        SELECT ac.id AS "action_id!", ac.idempotency_key AS "idempotency_key!"
+        FROM actions ac
+        JOIN authorizations a ON a.id = ac.authorization_id
+        JOIN proposals p ON p.id = a.proposal_id
+        LEFT JOIN action_results ar ON ar.action_id = ac.id
+        WHERE p.simulation_id = $1 AND ar.id IS NULL
+        "#,
+        simulation_id,
+    )
+    .fetch_all(pool)
+    .await
+}

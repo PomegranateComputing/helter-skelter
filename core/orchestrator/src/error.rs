@@ -31,6 +31,9 @@ pub enum OrchestratorError {
 
     #[error("snapshot {0} not found")]
     SnapshotNotFound(uuid::Uuid),
+
+    #[error("simulation {0} not found")]
+    SimulationNotFound(uuid::Uuid),
 }
 
 /// A single rejected inbound line: malformed JSON, or a well-formed

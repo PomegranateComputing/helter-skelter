@@ -4,6 +4,7 @@ pub mod error;
 pub mod health;
 pub mod operator;
 pub mod oscillation;
+pub mod report;
 pub mod snapshot;
 pub mod startup;
 pub mod state;

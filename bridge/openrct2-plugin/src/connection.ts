@@ -10,6 +10,16 @@ import type { CommandResult, Envelope, Hello, Payload } from "./protocol";
 import { PROTOCOL_VERSION } from "./protocol";
 import { randomUuidV7 } from "./uuid";
 
+// The plugin sandbox has no way to query the actual OpenRCT2 engine
+// release version at runtime -- `context.apiVersion` is the *plugin API*
+// version (an integer bumped on plugin-API changes, e.g. 115), not the
+// engine version, and no other property exposes it (checked exhaustively
+// against src/types/openrct2.d.ts; see docs/DECISIONS.md ADR-0007). So
+// this is injected at build time instead, from the same version this
+// project pins everywhere else (scripts/bootstrap/setup-openrct2.sh and
+// friends) -- see esbuild.config.mjs.
+declare const __OPENRCT2_VERSION__: string;
+
 function makeEnvelope(simulationId: string, kindPayload: Payload): Envelope {
   return {
     protocol_version: PROTOCOL_VERSION,
@@ -96,7 +106,7 @@ export class BridgeConnection {
     const hello: Hello = {
       role: "bridge",
       bridge_version: "0.1.0",
-      openrct2_version: String(context.apiVersion),
+      openrct2_version: __OPENRCT2_VERSION__,
     };
     this.write(makeEnvelope(this.simulationId, { kind: "hello", payload: hello }));
     this.flushSnapshotBuffer();
