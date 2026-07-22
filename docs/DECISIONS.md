@@ -558,3 +558,161 @@ second, overlapping mechanism.
   end-to-end was judged lower value than the three chaos scenarios the
   task named explicitly, given time spent. A future milestone that
   depends heavily on the watchdog's escalation behavior should add this.
+
+---
+
+## ADR-0007: Milestone 0.1 acceptance run and retrospective
+
+- Status: accepted
+- Date: 2026-07-21
+
+### Context
+
+Closing 0.1 required an unattended acceptance run against the real stack
+and a retrospective covering prediction quality, confirmed API gaps, and
+what 0.2 inherits. The original spec called for 8 continuous hours; this
+run was deliberately shortened (see Decision point 1) with the user's
+explicit sign-off, not assumed.
+
+### Decision
+
+1. **The acceptance run was 1 hour, not 8, by explicit user choice.**
+   Offered as an option alongside running the full 8h detached; 1h was
+   chosen as long enough to exercise the operator loop, a deliberate
+   bridge-kill recovery, and a reproducible rollback for real, while
+   fitting inside a single attended session. `scripts/dev/acceptance-0.1.sh`
+   takes the duration as its one argument (default 3600s) specifically so
+   a longer run remains one command away, not a rewrite, if a future
+   milestone wants the full 8h+ figure.
+2. **The run script's own first draft had a real bug, caught by running
+   it, not shipped blind:** two sequential `tail -n0 -F <file> | grep -m1
+   <pattern>` waits against the same log file raced when both target
+   lines landed within the same ~100ms (which is normal — both dev-park
+   rides' price-decrease proposals fire on the same snapshot and both
+   resolve near-instantly). `-n0` means "only lines written after this
+   `tail` starts," so the second wait's line, already written in the gap
+   before its `tail` process spawned, was silently missed and the wait
+   hung until timeout. Fixed by re-scanning the whole file on every poll
+   (`wait_for_log_line`) instead of tailing from "now" a second time.
+   This is the same *category* of bug ADR-0006 point 8 found in the
+   product code itself (a plausible-looking wait that's actually racy) —
+   worth remembering as a recurring failure shape in this codebase, not
+   a one-off.
+3. **The acceptance criteria are checked programmatically inside the
+   script, not eyeballed from logs afterward:** each of the task's named
+   criteria (bridge-kill recovery, at least one verified action, a
+   reproducible rollback, zero unlogged actions, no crash across the
+   full duration) has its own `PASS`/`FAIL` assertion with an exit-on-
+   first-failure, so a passing run is a run where every criterion was
+   actually checked, not merely "nothing looked wrong."
+
+### Acceptance run evidence
+
+From the real run at `exports/acceptance-0.1-20260721T180035-summary.txt`:
+
+- Duration target / actual: 3600s / 3597s
+- First simulation_id (action proof): `019f86b2-0a0a-765e-9d21-88fb4ab90477`
+- Post-rollback simulation_id: `019f86b2-c67b-7899-86df-2d3d7b29adad`
+- Action proposed/authorized/executed/verified: yes — both dev-park rides'
+  price dropped 5 → 4 (`The Operator`, confidence 0.80, "within budget,
+  confidence, price bounds, and cooldown"), verified by 3 recorded
+  observation.snapshots for the first simulation
+- Deliberate bridge-kill recovery: yes — orchestrator detected `lost`
+  within 20s of the kill, then recovered to `live` on reconnect with zero
+  human intervention
+- Reproducible rollback: yes — `orchestrator rollback --to
+  665b9add-2912-4769-a2d8-00781614cc5c` recorded rollback
+  `4f2d1ca7-3b08-4f47-b735-c00a7e12ee9d`, restored
+  `runtime/current-park.park`, and the restarted stack reached `live`
+  loading it
+- Zero unlogged actions cross-check: 12 `command.request sent` log lines,
+  12 `actions` rows — exact match
+- Final KPIs: cash 100000, guest count 0, park rating 312 (a 2-ride dev
+  park with the operator's price-decrease rule the only thing acting on
+  it — see the queue_length gap below for why guest count never moves
+  the price-increase branch)
+- Operator report: `exports/report-019f86b2-0a0a-765e-9d21-88fb4ab90477.md`
+
+**One more bug found closing out this ADR, fixed before tagging:** the
+report above (correctly) surfaced `OpenRCT2 version: 115` for the
+simulation — not an engine version, but `context.apiVersion`, the
+*plugin API* version. There is no property anywhere in
+`src/types/openrct2.d.ts` that exposes the actual engine release string
+to a running plugin (checked exhaustively, not assumed) — this is itself
+a confirmed API gap, not a bug in reading the API correctly. Fixed by
+injecting the pinned version (`0.5.3`, matching every
+`scripts/bootstrap/setup-openrct2.sh`-adjacent script) at build time via
+esbuild's `define`, the same mechanism `config/bridge.json` already uses
+— see `bridge/openrct2-plugin/src/connection.ts` and
+`esbuild.config.mjs`. Verified with a real (short) stack run showing
+`simulations.openrct2_version = '0.5.3'`; not worth re-running the full
+acceptance hour over, since nothing about the fix touches any of the
+criteria above — it's corrected metadata, not corrected behavior.
+
+### Retrospective: prediction quality
+
+The Operator's only prediction machinery in 0.1 is qualitative
+(`predicted_effect` free-text JSON, e.g. "guest_count expected to
+increase") plus the one quantitative guardrail added in phase 7:
+`max_unexpected_cash_drop`, checked against the very next snapshot. There
+is no numeric forecast to score for accuracy because none is made — a
+deliberate scope decision (ADR-0005 point 4), not an oversight. What *is*
+measurable and was measured across every phase's proof runs: the
+price-decrease rule fired exactly when `queue_length` stayed at or below
+threshold for `consecutive_snapshots_required` snapshots, never
+otherwise, and the governor's rejections always matched the exact
+constraint that should have fired (cooldown, confidence, budget, safety
+state) — the deterministic policy behaved exactly as specified, every
+time, across dozens of real and test runs. 0.2+ introducing any
+quantitative prediction (e.g. an expected cash delta a real rule could be
+scored against) is new work, not a gap in 0.1's own claims.
+
+### Retrospective: confirmed API gaps (carried into 0.2)
+
+- **`queue_length` is a hardcoded `0` placeholder for every ride, in
+  every real run this whole milestone.** No OpenRCT2 v0.5.3 scripting
+  API exposes it (checked exhaustively against `doc/openrct2.d.ts` —
+  see `docs/OPENRCT2_INTEGRATION.md`'s Gaps section). Consequence
+  confirmed by every real-stack proof run in phases 6–9: the
+  "queue-too-long" price-*increase* branch has never fired outside a
+  unit/integration test with synthetic data; only "queue-empty"
+  price-*decrease* has ever fired for real. **0.2 needs either an engine
+  patch exposing real queue length, or a different signal entirely** (a
+  future milestone should not assume this gap has closed just because
+  0.1 shipped).
+- **No plugin/CLI-triggered save exists.** `scripts/dev/snapshot.sh`
+  copies the engine's own autosave rather than triggering one (ADR-0005),
+  bounding snapshot freshness to the autosave interval (minimum 1
+  real-time minute, `config.ini`'s `AUTOSAVE_EVERY_MINUTE`). **0.2's
+  construction/demolition clone-based evaluation (ROADMAP.md) will want
+  much finer-grained, on-demand snapshots** than this ceiling allows —
+  this is the gap most likely to force an engine-side change before 0.2
+  can implement its own rollback story.
+- **`ride.status`'s `simulating` value and `weather`'s 9-value,
+  camelCase enum** are handled with documented lossy fallbacks
+  (`observation.ts`'s `mapRideStatus`/`mapWeather`) because the dev
+  park's fixture data never reaches those values. A 0.2+ scenario that
+  does reach them will surface this immediately; the fix is
+  straightforward (widen the protocol enum) but is unstarted.
+- **No property exposes the real OpenRCT2 engine version to a running
+  plugin** — only the plugin API version (`context.apiVersion`, e.g.
+  `115`). Found in this ADR's own acceptance-run report and fixed by
+  build-time injection rather than a runtime query; see "Acceptance run
+  evidence" above for the full account.
+
+### Needs for 0.2
+
+- Terrain/zoning/construction work is new surface area with no
+  precedent in 0.1's five bounded commands — the governor's
+  `PriceBounds`-shaped, single-numeric-field constraint model will not
+  generalize to placement/path-construction proposals as-is; expect a
+  new proposal shape, not a reuse of `governor::Proposal`.
+- The snapshot/rollback ceiling above (autosave-only, ~1-minute
+  granularity) is the most concrete blocker 0.2's clone-based evaluation
+  will hit first — worth resolving (or explicitly scoping around) early
+  in 0.2 rather than discovering it mid-milestone the way 0.1 discovered
+  the queue-length gap.
+- `core/world-model`'s current shape (latest snapshot + bounded history
+  + a couple of derived metrics) has no terrain/zoning representation at
+  all yet — 0.2's "terrain graph and buildable-space representation" is
+  additive to this module, per `docs/ROADMAP.md`, not a replacement.

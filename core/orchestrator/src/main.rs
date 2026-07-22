@@ -36,6 +36,13 @@ enum Command {
         #[arg(long, default_value = "manually resolved via CLI")]
         reason: String,
     },
+    /// Writes a Markdown operator report for one simulation to exports/ --
+    /// safety-state timeline, full decision ledger, incidents, final
+    /// KPIs, and unexplained anomalies. Read-only.
+    Report {
+        #[arg(long = "simulation")]
+        simulation: Uuid,
+    },
 }
 
 #[tokio::main]
@@ -87,6 +94,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
             println!("safety state resolved: {} -> normal", from_state.as_str());
+            Ok(())
+        }
+        Some(Command::Report { simulation }) => {
+            let markdown = orchestrator::report::generate(&pool, simulation).await?;
+            std::fs::create_dir_all("exports")?;
+            let path = format!("exports/report-{simulation}.md");
+            std::fs::write(&path, &markdown)?;
+            println!("report written to {path}");
             Ok(())
         }
         None => run_server(pool).await,

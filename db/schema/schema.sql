@@ -2,6 +2,7 @@
 --   docker exec helter-skelter-db-1 pg_dump -U helterskelter -d helterskelter \
 --     --schema-only --no-owner --no-privileges --exclude-table=_sqlx_migrations
 
+
 CREATE FUNCTION public.prevent_update_delete() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -24,7 +25,8 @@ CREATE TABLE public.actions (
     command jsonb NOT NULL,
     idempotency_key text NOT NULL,
     expiry_tick bigint NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    tick bigint NOT NULL
 );
 
 CREATE TABLE public.authorizations (
@@ -70,6 +72,16 @@ CREATE TABLE public.proposals (
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
+CREATE TABLE public.rollbacks (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    simulation_id uuid NOT NULL,
+    snapshot_id uuid NOT NULL,
+    reason text NOT NULL,
+    triggered_by text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rollbacks_triggered_by_check CHECK ((triggered_by = ANY (ARRAY['manual'::text, 'automatic'::text])))
+);
+
 CREATE TABLE public.simulations (
     id uuid NOT NULL,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -83,7 +95,20 @@ CREATE TABLE public.snapshots (
     simulation_id uuid NOT NULL,
     kind text NOT NULL,
     storage_path text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    tick bigint NOT NULL
+);
+
+CREATE TABLE public.state_transitions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    simulation_id uuid,
+    from_state text NOT NULL,
+    to_state text NOT NULL,
+    reason text NOT NULL,
+    triggered_by text NOT NULL,
+    expires_at_tick bigint,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT state_transitions_triggered_by_check CHECK ((triggered_by = ANY (ARRAY['orchestrator'::text, 'watchdog'::text, 'manual'::text])))
 );
 
 ALTER TABLE ONLY public.observations ALTER COLUMN id SET DEFAULT nextval('public.observations_id_seq'::regclass);
@@ -109,11 +134,17 @@ ALTER TABLE ONLY public.observations
 ALTER TABLE ONLY public.proposals
     ADD CONSTRAINT proposals_pkey PRIMARY KEY (id);
 
+ALTER TABLE ONLY public.rollbacks
+    ADD CONSTRAINT rollbacks_pkey PRIMARY KEY (id);
+
 ALTER TABLE ONLY public.simulations
     ADD CONSTRAINT simulations_pkey PRIMARY KEY (id);
 
 ALTER TABLE ONLY public.snapshots
     ADD CONSTRAINT snapshots_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.state_transitions
+    ADD CONSTRAINT state_transitions_pkey PRIMARY KEY (id);
 
 CREATE INDEX action_results_action_id_idx ON public.action_results USING btree (action_id);
 
@@ -123,7 +154,11 @@ CREATE INDEX observations_simulation_id_idx ON public.observations USING btree (
 
 CREATE INDEX proposals_simulation_id_idx ON public.proposals USING btree (simulation_id, created_at);
 
+CREATE INDEX rollbacks_simulation_id_idx ON public.rollbacks USING btree (simulation_id, created_at);
+
 CREATE INDEX snapshots_simulation_id_idx ON public.snapshots USING btree (simulation_id, created_at);
+
+CREATE INDEX state_transitions_created_at_idx ON public.state_transitions USING btree (created_at DESC);
 
 CREATE TRIGGER action_results_append_only BEFORE DELETE OR UPDATE ON public.action_results FOR EACH ROW EXECUTE FUNCTION public.prevent_update_delete();
 
@@ -135,7 +170,11 @@ CREATE TRIGGER observations_append_only BEFORE DELETE OR UPDATE ON public.observ
 
 CREATE TRIGGER proposals_append_only BEFORE DELETE OR UPDATE ON public.proposals FOR EACH ROW EXECUTE FUNCTION public.prevent_update_delete();
 
+CREATE TRIGGER rollbacks_append_only BEFORE DELETE OR UPDATE ON public.rollbacks FOR EACH ROW EXECUTE FUNCTION public.prevent_update_delete();
+
 CREATE TRIGGER snapshots_append_only BEFORE DELETE OR UPDATE ON public.snapshots FOR EACH ROW EXECUTE FUNCTION public.prevent_update_delete();
+
+CREATE TRIGGER state_transitions_append_only BEFORE DELETE OR UPDATE ON public.state_transitions FOR EACH ROW EXECUTE FUNCTION public.prevent_update_delete();
 
 ALTER TABLE ONLY public.action_results
     ADD CONSTRAINT action_results_action_id_fkey FOREIGN KEY (action_id) REFERENCES public.actions(id);
@@ -152,6 +191,15 @@ ALTER TABLE ONLY public.observations
 ALTER TABLE ONLY public.proposals
     ADD CONSTRAINT proposals_simulation_id_fkey FOREIGN KEY (simulation_id) REFERENCES public.simulations(id);
 
+ALTER TABLE ONLY public.rollbacks
+    ADD CONSTRAINT rollbacks_simulation_id_fkey FOREIGN KEY (simulation_id) REFERENCES public.simulations(id);
+
+ALTER TABLE ONLY public.rollbacks
+    ADD CONSTRAINT rollbacks_snapshot_id_fkey FOREIGN KEY (snapshot_id) REFERENCES public.snapshots(id);
+
 ALTER TABLE ONLY public.snapshots
     ADD CONSTRAINT snapshots_simulation_id_fkey FOREIGN KEY (simulation_id) REFERENCES public.simulations(id);
+
+ALTER TABLE ONLY public.state_transitions
+    ADD CONSTRAINT state_transitions_simulation_id_fkey FOREIGN KEY (simulation_id) REFERENCES public.simulations(id);
 

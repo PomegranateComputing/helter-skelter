@@ -5,6 +5,12 @@ import { build } from "esbuild";
 // filesystem API to read it at runtime. See src/config.ts.
 const bridgeConfig = JSON.parse(readFileSync("../../config/bridge.json", "utf8"));
 
+// The pinned OpenRCT2 release this plugin is built against -- there is no
+// way to query it from the plugin API at runtime (see src/connection.ts's
+// __OPENRCT2_VERSION__ doc comment). Keep in sync with the OPENRCT2_VERSION
+// pinned in scripts/bootstrap/setup-openrct2.sh and scripts/dev/*.sh.
+const OPENRCT2_VERSION = "0.5.3";
+
 await build({
   entryPoints: ["src/index.ts"],
   outfile: "dist/plugin.js",
@@ -13,6 +19,7 @@ await build({
   target: "es2020",
   define: {
     __BRIDGE_CONFIG__: JSON.stringify(bridgeConfig),
+    __OPENRCT2_VERSION__: JSON.stringify(OPENRCT2_VERSION),
   },
 });
 
